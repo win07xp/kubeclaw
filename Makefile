@@ -335,7 +335,9 @@ e2e: ## One-shot k3d e2e: recreate the cluster, build+import images, install the
 	hack/k3d-up.sh
 	$(MAKE) e2e-images
 	$(MAKE) e2e-deploy
-	go test ./test/e2e/... -tags e2e -v -timeout 20m
+	# -count=1 defeats go's test cache: the suite drives a live cluster the
+	# cache knows nothing about, and a replayed transcript is not a gate.
+	go test ./test/e2e/... -tags e2e -v -timeout 20m -count=1
 
 ##@ Dependencies
 
