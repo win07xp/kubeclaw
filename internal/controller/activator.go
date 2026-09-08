@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -32,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kaalmv1beta1 "github.com/win07xp/kaalm/api/v1beta1"
+	"github.com/win07xp/kaalm/internal/tlsutil"
 )
 
 // ActivatorServer serves the controller's :9443 endpoints: kubelet probes
@@ -54,15 +54,11 @@ func (s *ActivatorServer) NeedLeaderElection() bool { return false }
 
 // Start serves until ctx is cancelled. It satisfies manager.Runnable.
 func (s *ActivatorServer) Start(ctx context.Context) error {
-	caPEM, err := os.ReadFile(s.CAFile)
-	if err != nil {
-		return err
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return fmt.Errorf("no certificates parsed from %s", s.CAFile)
-	}
-	cert, err := tls.LoadX509KeyPair(s.CertFile, s.KeyFile)
+	// The serving cert is re-read per handshake and ClientCAs rebuilt per
+	// connection, so cert-manager rotation applies without a restart (#149).
+	// Probes present no cert; the activate handler enforces per-path.
+	loader := &tlsutil.CertLoader{CertFile: s.CertFile, KeyFile: s.KeyFile, CAFile: s.CAFile}
+	tlsCfg, err := loader.ServerMTLSConfig(tls.VerifyClientCertIfGiven)
 	if err != nil {
 		return err
 	}
@@ -74,15 +70,9 @@ func (s *ActivatorServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/activate/", s.handleActivate)
 
 	server := &http.Server{
-		Addr:    s.Addr,
-		Handler: mux,
-		TLSConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-			// Probes present no cert; the activate handler enforces per-path.
-			ClientAuth: tls.VerifyClientCertIfGiven,
-			ClientCAs:  pool,
-		},
+		Addr:              s.Addr,
+		Handler:           mux,
+		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

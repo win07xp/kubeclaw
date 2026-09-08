@@ -18,17 +18,16 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/win07xp/kaalm/internal/tlsutil"
 )
 
 // AgentActivity is one replica's view of one agent's two signal sources.
@@ -97,29 +96,22 @@ func (g *GatewayActivityClient) httpClient() (*http.Client, error) {
 
 // newGatewayMTLSClient builds the controller's client for gateway Pod-IP
 // dials: its own certificate as the client identity, the Kaalm CA as trust,
-// and SAN verification pinned to the gateway Service DNS.
+// and SAN verification pinned to the gateway Service DNS. Certificate and
+// pool are re-read per connection so rotation applies without a controller
+// restart (#149).
 func newGatewayMTLSClient(certFile, keyFile, caFile, operatorNamespace string) (*http.Client, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
+	loader := &tlsutil.CertLoader{CertFile: certFile, KeyFile: keyFile, CAFile: caFile}
+	if _, err := loader.Certificate(); err != nil {
 		return nil, err
 	}
-	caPEM, err := os.ReadFile(caFile)
-	if err != nil {
+	if _, err := loader.CAPool(); err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("no certificates parsed from %s", caFile)
-	}
+	// Pod-IP dials: SAN verification runs against the Service DNS.
+	serverName := fmt.Sprintf("%s.%s.svc.cluster.local", gatewayServiceName, operatorNamespace)
 	return &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      pool,
-			// Pod-IP dials: SAN verification runs against the Service DNS.
-			ServerName: fmt.Sprintf("%s.%s.svc.cluster.local", gatewayServiceName, operatorNamespace),
-		}},
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{DialTLSContext: loader.DialTLSContext(serverName)},
 	}, nil
 }
 
