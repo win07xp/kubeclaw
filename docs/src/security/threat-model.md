@@ -137,7 +137,7 @@ The poll endpoint authenticates the caller against the AgentChannel named by the
 
 #### SSRF through callbackUrl
 
-The gateway has stronger egress than any user namespace, so an unrestricted `callbackUrl` would let the developer turn the gateway into a confused deputy. The AgentChannelReconciler enforces at admission/reconcile time that `callbackUrl` uses `https://` and that its host does not resolve to loopback, link-local, RFC1918, unique-local IPv6, or cloud-metadata IPs (see [Cross-Resource Validation rule 22](../resources/validation-and-defaulting.md#cross-resource-validation)).
+The gateway has stronger egress than any user namespace, so an unrestricted `callbackUrl` would let the developer turn the gateway into a confused deputy. The AgentChannelReconciler enforces at admission/reconcile time that `callbackUrl` uses `https://` and that its host does not resolve to loopback, link-local, RFC1918, unique-local IPv6, shared address space (100.64.0.0/10), benchmarking space (198.18.0.0/15), or cloud-metadata IPs (see [Cross-Resource Validation rule 22](../resources/validation-and-defaulting.md#cross-resource-validation)).
 
 On every delivery attempt the gateway re-resolves the host, re-applies the check, and **dials the exact IP that passed**: a custom dialer resolves once, range-checks the result, and connects to that pinned IP:port while preserving the Host header and SNI (see [Request Flow step 8](../gateways/user/overview.md#request-flow)). Handing the hostname back to the HTTP transport would let it re-resolve independently, re-opening the DNS-rebinding window the check exists to close. Platform teams may replace the deny-internal default with an explicit allowlist through the Helm value `gateway.callbackUrl.allowlist`.
 

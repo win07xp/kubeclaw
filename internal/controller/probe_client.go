@@ -19,6 +19,7 @@ package controller
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -33,9 +34,17 @@ import (
 // upstream trust pool. The client carries no Timeout of its own; each probe
 // is bounded by its healthCheck.timeoutSeconds context.
 func NewProbeClient(caFiles []string) *http.Client {
-	return &http.Client{Transport: &caReloadingTransport{
-		loader: &tlsutil.CAPoolLoader{Files: caFiles, Additive: true},
-	}}
+	return &http.Client{
+		Transport: &caReloadingTransport{
+			loader: &tlsutil.CAPoolLoader{Files: caFiles, Additive: true},
+		},
+		// The same refusal the default probe client applies (#153): Go's
+		// cross-host header stripping does not cover x-api-key, and a
+		// redirecting endpoint is not a healthy one.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("provider health probes do not follow redirects")
+		},
+	}
 }
 
 // caReloadingTransport rebuilds its inner transport when the probe trust

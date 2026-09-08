@@ -57,6 +57,25 @@ func New(entries []string) Policy {
 // NewFromCSV builds a Policy from a comma-separated flag value.
 func NewFromCSV(csv string) Policy { return New(strings.Split(csv, ",")) }
 
+// internalInPractice holds address space that is internal in real clusters
+// but outside net.IP.IsPrivate: RFC 6598 shared address space (100.64.0.0/10,
+// the Pod or Service CIDR in several managed clusters and CNIs) and RFC 2544
+// benchmarking space (198.18.0.0/15). Denied by default at the same tier as
+// private space, so the allowlist can open them deliberately (rule 22, #154).
+var internalInPractice = mustCIDRs("100.64.0.0/10", "198.18.0.0/15")
+
+func mustCIDRs(entries ...string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(entries))
+	for _, entry := range entries {
+		_, network, err := net.ParseCIDR(entry)
+		if err != nil {
+			panic(err)
+		}
+		nets = append(nets, network)
+	}
+	return nets
+}
+
 // Allowed reports whether a callbackUrl resolving to ip (with the URL's host)
 // may receive async responses.
 //
@@ -64,8 +83,9 @@ func NewFromCSV(csv string) Policy { return New(strings.Split(csv, ",")) }
 // endpoint), and the unspecified address are refused unconditionally: an
 // allowlist can open internal network space, but it cannot re-expose the
 // targets that make SSRF trivially exploitable. Beyond that floor, an
-// allowlist match wins; otherwise private space (RFC1918 and unique-local
-// IPv6) is denied and public addresses are allowed.
+// allowlist match wins; otherwise private space (RFC1918, unique-local IPv6,
+// shared address space, and benchmarking space) is denied and public
+// addresses are allowed.
 func (p Policy) Allowed(host string, ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return false
@@ -74,7 +94,15 @@ func (p Policy) Allowed(host string, ip net.IP) bool {
 		return true
 	}
 	// net.IP.IsPrivate covers RFC1918 and RFC4193 unique-local IPv6.
-	return !ip.IsPrivate()
+	if ip.IsPrivate() {
+		return false
+	}
+	for _, network := range internalInPractice {
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p Policy) matches(host string, ip net.IP) bool {
