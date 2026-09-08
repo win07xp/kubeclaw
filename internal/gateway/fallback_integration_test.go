@@ -138,6 +138,34 @@ func TestIntegration_FallbackExhaustionMaps503(t *testing.T) {
 	}
 }
 
+// TestIntegration_UpstreamRedirectIsRefused: the provider client never
+// follows a redirect (#153): Go strips Authorization cross-host but not
+// x-api-key, so following would re-send an Anthropic-format credential to
+// the redirect target. One request reaches the upstream; the refusal
+// classifies as a connect failure and exhausts as provider_unavailable.
+func TestIntegration_UpstreamRedirectIsRefused(t *testing.T) {
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://internal.example/steal")
+		w.WriteHeader(http.StatusFound)
+	})
+	h.seedRoute()
+	cert := agentCert(t, h.ca)
+	resp := postJSON(t, h.client(&cert), h.url("/v1/chat/completions"), map[string]any{"model": "prov/m1"}, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("redirect refusal should exhaust as 503, got %d", resp.StatusCode)
+	}
+	if got := errType(t, resp); got != errProviderUnavailable {
+		t.Errorf("error type %q", got)
+	}
+	<-h.upreqs // the 302 answer itself
+	select {
+	case r := <-h.upreqs:
+		t.Errorf("redirect was followed: a second upstream request arrived: %+v", r.header)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestIntegration_RateLimit429(t *testing.T) {
 	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

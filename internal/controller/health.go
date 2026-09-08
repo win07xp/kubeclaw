@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -76,7 +77,15 @@ func (h *HTTPProviderHealthChecker) Probe(
 	timeout := healthCheckTimeout(provider)
 	cl := h.Client
 	if cl == nil {
-		cl = &http.Client{Timeout: timeout}
+		cl = &http.Client{
+			Timeout: timeout,
+			// Probes never follow redirects: Go's cross-host header stripping
+			// does not cover x-api-key, and a redirecting endpoint is not a
+			// healthy one anyway. A refusal classifies as a transient error.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("provider health probes do not follow redirects")
+			},
+		}
 	}
 	// Bound the request by the configured timeout via the context too, so an
 	// injected Client (tests) and the default client both honor the field.

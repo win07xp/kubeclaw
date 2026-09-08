@@ -207,6 +207,9 @@ func (s *Server) platformClient() (*http.Client, error) {
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}},
 		Timeout:   s.Config.AgentReadTimeout,
+		// Refused like every outbound leg (#153); the reply schedule treats
+		// it as a transport failure and retries, then reports exhaustion.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errNoRedirects },
 	}, nil
 }
 

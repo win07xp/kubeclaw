@@ -112,6 +112,53 @@ func TestDialCallbackOnce_SuccessAndSigning(t *testing.T) {
 	}
 }
 
+// TestDialCallbackOnce_RedirectRefused: the callback dialer never follows a
+// redirect (#153). The pinned transport already keeps one on the checked
+// host; refusing makes the posture explicit and the attempt fails as a
+// transport error (the retried bucket).
+func TestDialCallbackOnce_RedirectRefused(t *testing.T) {
+	ca := newTestCA(t)
+	cert := ca.issue(t, "callback.test")
+	hits := make(chan string, 4)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{
+		ReadHeaderTimeout: time.Second,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits <- r.URL.Path
+			w.Header().Set("Location", "https://callback.test/elsewhere")
+			w.WriteHeader(http.StatusFound)
+		}),
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	s := callbackClientServer(t, ca)
+	parsed, _ := url.Parse("https://callback.test:" + port + "/cb")
+	ch := &kaalmv1beta1.AgentChannel{
+		ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "team-a"},
+		Spec:       kaalmv1beta1.AgentChannelSpec{Webhook: &kaalmv1beta1.AgentChannelWebhook{}},
+	}
+	_, err = s.dialCallbackOnce(context.Background(), parsed, net.ParseIP("127.0.0.1"),
+		ch, "", "req-r", []byte(`{}`))
+	if err == nil {
+		t.Fatal("a redirect answer must surface as an error, not be followed")
+	}
+	if got := <-hits; got != "/cb" {
+		t.Errorf("first request path = %q", got)
+	}
+	select {
+	case p := <-hits:
+		t.Errorf("redirect was followed to %q", p)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestSendCallback_Rejections(t *testing.T) {
 	s := &Server{ChannelHealth: NewChannelHealthStore(0)}
 	base := &kaalmv1beta1.AgentChannel{

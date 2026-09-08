@@ -64,6 +64,37 @@ func TestHTTPProbe_HealthyWithinTimeout(t *testing.T) {
 	}
 }
 
+// TestHTTPProbe_RedirectIsRefused: the probe's default client never follows
+// a redirect (#153): Go's cross-host header stripping does not cover
+// x-api-key. The 302 answer classifies as a transient error, and the
+// redirect target is never requested.
+func TestHTTPProbe_RedirectIsRefused(t *testing.T) {
+	hits := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- r.URL.Path
+		w.Header().Set("Location", "/exfil")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	checker := &HTTPProviderHealthChecker{}
+	provider := &kaalmv1beta1.ModelProvider{
+		Spec: kaalmv1beta1.ModelProviderSpec{Type: "anthropic", Endpoint: srv.URL},
+	}
+	res := checker.Probe(context.Background(), provider, "sk-test")
+	if res.Healthy || res.AuthFailed || res.Err == nil {
+		t.Fatalf("redirect answer must classify as a transient error, got %+v", res)
+	}
+	if got := <-hits; got != "/v1/models" {
+		t.Errorf("first request path = %q", got)
+	}
+	select {
+	case p := <-hits:
+		t.Errorf("redirect was followed to %q", p)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // ---- HTTPProviderHealthChecker.Probe classification ----
 
 func TestHTTPProbe_Classification(t *testing.T) {

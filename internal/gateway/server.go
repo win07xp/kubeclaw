@@ -419,7 +419,12 @@ func (s *Server) upstream() *http.Client {
 				return dialer.DialContext(ctx, network, addr)
 			}
 		}
-		s.upstreamClient = &http.Client{Timeout: s.Config.UpstreamTimeout, Transport: transport}
+		s.upstreamClient = &http.Client{
+			Timeout: s.Config.UpstreamTimeout, Transport: transport,
+			// A refused redirect surfaces as a connect-class failure, so the
+			// fallback walk continues past it (#153).
+			CheckRedirect: func(*http.Request, []*http.Request) error { return errNoRedirects },
+		}
 	})
 	return s.upstreamClient
 }

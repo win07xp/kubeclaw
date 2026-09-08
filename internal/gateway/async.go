@@ -329,6 +329,11 @@ func (s *Server) sendCallback(
 
 		status, err := s.dialCallbackOnce(ctx, parsed, ip, channel, secret, requestID, payload)
 		if err == nil && status >= 200 && status <= 299 {
+			// The resolved, pinned address is the one dial-time input no
+			// versioned artifact can reproduce; denials already record theirs
+			// in the health observation, so successes log it here (#139).
+			slog.Info("callback delivered", "requestId", requestID,
+				"channel", channel.Spec.Path(), "host", host, "resolvedIP", ip.String())
 			return callbackDelivered
 		}
 		switch status {
@@ -367,7 +372,12 @@ func (s *Server) dialCallbackOnce(
 		},
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: parsed.Hostname(), RootCAs: callbackCAs},
 	}
-	client := &http.Client{Transport: transport, Timeout: s.Config.AgentReadTimeout}
+	client := &http.Client{
+		Transport: transport, Timeout: s.Config.AgentReadTimeout,
+		// The pinned transport already keeps a redirect from leaving the
+		// checked host; refusing them outright removes the ambiguity (#153).
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errNoRedirects },
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), bytes.NewReader(payload))
 	if err != nil {
