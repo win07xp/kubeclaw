@@ -54,7 +54,7 @@ The gateway splits the model name on the **first** `/`: the prefix identifies th
 
 This format uniquely identifies the (provider, model) pair and eliminates ambiguity when multiple ModelProviders offer models with similar names, for example a managed Anthropic endpoint and an OpenAI-compatible proxy both serving Claude models. The agent is always responsible for constructing the qualified `provider/model` name in its API calls.
 
-Where the qualified name appears follows the upstream format: in the request body's `model` field for Anthropic, OpenAI, and OpenAI-compatible formats, and in the URL path's `{model}` segment (URL-encoded) for Google Vertex. See [Request Format Detection](#request-format-detection) below.
+The qualified name travels in the request body's `model` field for every served format. See [Request Format Detection](#request-format-detection).
 
 ## Request Format Detection
 
@@ -63,11 +63,14 @@ The agent sends LLM requests using the upstream provider's native API format. Th
 - `/v1/messages` -> Anthropic format
 - `/v1/chat/completions` -> OpenAI / OpenAI-compatible format (also used by vLLM, Ollama, LiteLLM)
 - `/v1/completions` -> OpenAI legacy completions format
-- `…/models/{model}:generateContent` and `…/models/{model}:streamGenerateContent` -> Google Vertex (Gemini) format
 
-The Vertex adapter matches on the `:generateContent` / `:streamGenerateContent` method suffix rather than a fixed prefix, because Vertex paths embed project and location segments. Vertex is also the one format that names the model in the **URL path** rather than the request body: the `{model}` segment carries the qualified `{providerRef}/{modelId}` name (URL-encoded), and the gateway rewrites it to the raw model ID before forwarding, which is the same strip-the-prefix step applied to body-carried model names. On `:streamGenerateContent` the adapter also guarantees `?alt=sse` is present (see [Streaming Responses](#streaming-responses)).
+These three paths are the whole served inbound surface: any other path on the cluster listener is rejected with `400 invalid_request`. The gateway uses the detected format to parse the request (extracting the model name and other fields), then forwards to the upstream provider.
 
-Each provider adapter registers the path patterns it recognizes; requests to unrecognized paths on the cluster listener are rejected with `400 invalid_request`. The gateway uses the detected format to parse the request (extracting the model name and other fields), then forwards to the upstream provider.
+### The google-vertex type is reserved
+
+The ModelProvider API accepts `spec.type: google-vertex`, but the type is not servable in this release: no Vertex-format inbound path is routed on the cluster listener, cross-format fallback cannot translate into it ([rule 12](../../resources/validation-and-defaulting.md#cross-resource-validation) keeps `google-vertex` chains same-type), and the gateway does not mint the OAuth2 tokens the platform requires in place of static API keys. The adapter's outbound pieces, usage extraction, URL-path model rewriting, and the `?alt=sse` streaming fixup, stay in the code for the finished feature.
+
+Google has retired the Vertex AI brand: the platform is now the Gemini Enterprise Agent Platform, with the wire API carried forward unchanged, so `google-vertex` remains the stable enum value. Full support is a backlog item on the [roadmap](../../ROADMAP.md#beyond).
 
 The gateway is **protocol-aware** in that it understands request/response shapes for supported provider types, which it needs for token extraction, model name parsing, and similar work. It translates between formats in one situation only: a fallback candidate of a different `spec.type` (since v0.7.0), where the request is rewritten into the candidate's format before the first byte and the response, streaming or not, is rewritten back; see [Crossing formats](fallback.md#crossing-formats) for the pairs, the matrix, and what cannot cross. Everywhere else the request path is passthrough: the primary is always spoken to in the caller's format, and same-type fallbacks are too.
 

@@ -13,7 +13,7 @@ Agents and AgentTasks created by the controller have an Agent (or AgentTask) res
 1. **Source IP -> Pod**: resolved from the Pod informer cache (see [Namespace Identification](workload-identity.md)).
 2. **Pod -> Agent**: the Pod's ownerRef identifies the Agent (or AgentTask) resource. The gateway maintains an Agent informer cache for this lookup.
 3. **Agent -> allowed providers**: the Agent's `spec.providers` lists the ModelProviders this agent may use. The referenced providers must also appear in the AgentClass's `allowedProviders`. The gateway resolves the class from the workload's `agentClassRef` via its AgentClass informer (see [Gateway Readiness](operations.md#gateway-readiness) and [Gateway ServiceAccount permissions](../../security/rbac.md#gateway-serviceaccount-permissions)).
-4. **Model name -> ModelProvider**: the gateway parses the `provider/model` qualified name from the request body (or, for Vertex-format requests, from the URL path's `{model}` segment, see [Model Identification](request-handling.md#model-identification)). The provider prefix must match a `providerRef` in the Agent's `spec.providers`. If it does not, the request is rejected.
+4. **Model name -> ModelProvider**: the gateway parses the `provider/model` qualified name from the request body (see [Model Identification](request-handling.md#model-identification)). The provider prefix must match a `providerRef` in the Agent's `spec.providers`. If it does not, the request is rejected.
 5. **ModelProvider -> upstream**: the gateway reads the ModelProvider's `spec.endpoint`, `spec.type`, and credentials to forward the request. The namespace must also be in the ModelProvider's `allowedNamespaces`.
 
 This chain ensures that an agent can only reach ModelProviders explicitly listed in its spec, which in turn must be in the AgentClass's `allowedProviders` and must include the agent's namespace in `allowedNamespaces`. All three access checks (Agent -> ModelProvider -> Namespace) must pass.
@@ -23,7 +23,7 @@ This chain ensures that an agent can only reach ModelProviders explicitly listed
 Existing workloads that authenticate with a projected ServiceAccount bearer token have **no Agent resource**, so steps 2 to 4 above do not apply. Routing is governed by the ModelProvider's own allowlist plus its model list:
 
 1. **Token -> namespace**: `TokenReview` yields the caller's authenticated namespace (see [Mode 2](workload-identity.md#mode-2-serviceaccount-bearer-token)).
-2. **Model name -> ModelProvider**: the gateway parses the `provider/model` qualified name from the request body (or the URL path for Vertex-format requests, see [Model Identification](request-handling.md#model-identification)). The provider prefix must resolve to an existing `ModelProvider` by `metadata.name`; if not, the request is rejected with `400 invalid_request`.
+2. **Model name -> ModelProvider**: the gateway parses the `provider/model` qualified name from the request body (see [Model Identification](request-handling.md#model-identification)). The provider prefix must resolve to an existing `ModelProvider` by `metadata.name`; if not, the request is rejected with `400 invalid_request`.
 3. **Namespace allowlist**: the caller's namespace must match a `ModelProvider.spec.allowedNamespaces` entry (exact name or glob). If not, the request is rejected with `403 access_denied`.
 4. **Model allowlist**: the requested model must appear in `ModelProvider.spec.models`. If not, the request is rejected with `400 invalid_request`.
 5. **Forward**: the gateway reads `spec.endpoint`, `spec.type`, and credentials and forwards the request.
@@ -34,9 +34,9 @@ Existing workloads that authenticate with a projected ServiceAccount bearer toke
 
 Provider credentials are stored as Secrets in `kaalm-system` and referenced by ModelProvider. The gateway reads these Secrets directly at startup and watches them for rotation. Credentials never leave `kaalm-system`: there is no per-agent or per-namespace credential copying. The full storage-to-rotation lifecycle, including who else can read the Secret, is in [Lifecycle of an LLM API key](../../security/credentials.md#lifecycle-of-an-llm-api-key).
 
-The credential's shape is adapter-specific. For Anthropic, OpenAI, and OpenAI-compatible providers, the referenced Secret holds a static API key that the adapter injects as the provider's auth header. Google Vertex does not accept static API keys: its Secret holds a GCP service-account JSON key, and the Vertex adapter mints OAuth2 access tokens from it (cached in memory and refreshed roughly 5 minutes before the ~1-hour expiry), attaching the current token as the `Authorization: Bearer` header on LLM requests and health probes alike.
+The credential's shape is adapter-specific: for Anthropic, OpenAI, and OpenAI-compatible providers, the referenced Secret holds a static API key that the adapter injects as the provider's auth header. The reserved `google-vertex` type will not take a static key: serving it requires minting OAuth2 access tokens from a GCP service-account key, which this release does not implement (see [the type's status](request-handling.md#the-google-vertex-type-is-reserved)).
 
-When a credential Secret is updated, the gateway's Secret watcher picks up the change and refreshes the in-memory credential without a restart (for Vertex, the next token mint uses the new service-account key).
+When a credential Secret is updated, the gateway's Secret watcher picks up the change and refreshes the in-memory credential without a restart.
 
 ## Provider Adapters
 
@@ -51,7 +51,7 @@ type ProviderAdapter interface {
 }
 ```
 
-v1 ships adapters for: Anthropic, OpenAI, Google Vertex, OpenAI-compatible (Ollama/vLLM/LiteLLM gateways).
+v1 ships adapters for Anthropic, OpenAI, and OpenAI-compatible providers (Ollama, vLLM, and LiteLLM gateways). The `google-vertex` type is reserved and not servable in this release; its adapter's outbound pieces remain for the finished feature (see [the type's status](request-handling.md#the-google-vertex-type-is-reserved)).
 
 Pre-call token estimation is not used for budget gating (it adds latency and is inaccurate). Budget checks use the last-known spend state. Post-call actual usage is authoritative for accounting.
 

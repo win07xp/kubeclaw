@@ -17,6 +17,7 @@ metadata:
   name: anthropic-shared
 spec:
   # Provider type. Built-in: "anthropic" | "openai" | "google-vertex" | "openai-compatible"
+  # ("google-vertex" is reserved and not servable in this release; see the gateway chapter)
   type: anthropic
 
   # Endpoint override (for self-hosted or custom gateways). Optional for known types.

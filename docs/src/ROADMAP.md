@@ -86,6 +86,12 @@ they are likely to matter:
   [#124](https://github.com/win07xp/kaalm/issues/124).
 - **Agent Sandbox integration.** The `agentSandbox` runtime backend for
   code-executing agents.
+- **Serving the `google-vertex` provider type.** The enum is reserved and
+  the adapter's outbound pieces exist, but no inbound path is routed and
+  the OAuth2 token minting the platform requires is not implemented
+  ([#147](https://github.com/win07xp/kaalm/issues/147) records the
+  alignment). Google now brands the platform the Gemini Enterprise Agent
+  Platform; the wire API is unchanged.
 - **Larger horizons.** Agent-to-agent orchestration, multi-cluster
   federation, and agent-aware scheduling (GPU awareness, priority, preemption).
 

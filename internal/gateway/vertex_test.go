@@ -21,17 +21,24 @@ import (
 	"testing"
 )
 
-func TestVertexPathDetection(t *testing.T) {
+// TestVertexPathsNotServed locks the reserved status (#147): google-vertex
+// has no inbound surface, so Vertex-shaped paths resolve no adapter, exactly
+// like any unrecognized path.
+func TestVertexPathsNotServed(t *testing.T) {
 	base := "/v1/projects/p/locations/us/publishers/google/models/gw-vertex%2Fgemini-2:generateContent"
-	if _, ok := adapterForPath(base); !ok {
-		t.Fatal("generateContent path must resolve to the Vertex adapter")
+	if _, ok := adapterForPath(base); ok {
+		t.Fatal("generateContent path must not resolve: google-vertex is reserved")
 	}
 	stream := "/v1/projects/p/locations/us/publishers/google/models/gw-vertex%2Fgemini-2:streamGenerateContent"
-	if _, ok := adapterForPath(stream); !ok {
-		t.Fatal("streamGenerateContent path must resolve to the Vertex adapter")
+	if _, ok := adapterForPath(stream); ok {
+		t.Fatal("streamGenerateContent path must not resolve: google-vertex is reserved")
 	}
 	if _, ok := adapterForPath("/v1/nonsense"); ok {
 		t.Error("an unrecognized path must not resolve")
+	}
+	// The outbound half stays: the type still has its adapter.
+	if _, ok := adapterForProviderType(providerTypeVertex); !ok {
+		t.Error("the reserved type keeps its outbound adapter")
 	}
 }
 
