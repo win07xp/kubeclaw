@@ -109,10 +109,16 @@ func (s *Server) handleTaskComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// (c) the identity gate: the calling Pod's UID must match
-	// status.currentPodUID. Resolved from the source IP; retryable because
-	// the benign informer-lag race shares this rejection.
+	// status.currentPodUID. Resolved from the source IP, with the live
+	// namespace-narrowed fallback on an informer miss (task-complete.md,
+	// cross-check step 2; #148); retryable because the benign informer-lag
+	// race on currentPodUID itself shares this rejection.
 	if !s.Config.DisableSourceIPCheck {
-		pod, found := s.Store.PodByIP(r.Context(), sourceIP(r))
+		ip := sourceIP(r)
+		pod, found := s.Store.PodByIP(r.Context(), ip)
+		if !found {
+			pod, found = s.Store.PodByIPLive(r.Context(), c.Namespace, ip)
+		}
 		if !found || task.Status.CurrentPodUID == "" || string(pod.UID) != task.Status.CurrentPodUID {
 			writeError(w, http.StatusForbidden, errorBody{
 				Type: errAccessDenied, Retryable: true,

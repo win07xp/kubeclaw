@@ -36,6 +36,9 @@ const PodIPIndex = "status.podIP"
 type KubeStore struct {
 	// Reader is the cache-backed client.
 	Reader client.Reader
+	// APIReader is the uncached client backing PodByIPLive. Nil disables the
+	// live fallback (informer-only resolution).
+	APIReader client.Reader
 	// OperatorNamespace hosts the provider credential Secrets.
 	OperatorNamespace string
 }
@@ -171,9 +174,30 @@ func (k *KubeStore) PodByIP(ctx context.Context, ip string) (*corev1.Pod, bool) 
 	if err := k.Reader.List(ctx, &pods, client.MatchingFields{PodIPIndex: ip}); err != nil {
 		return nil, false
 	}
+	return firstLivePod(&pods)
+}
+
+// PodByIPLive resolves a source IP with a live List against the apiserver,
+// narrowed to namespace. status.podIP is an apiserver-supported Pod field
+// selector, so the uncached reader passes the match through as a selector
+// rather than listing the namespace.
+func (k *KubeStore) PodByIPLive(ctx context.Context, namespace, ip string) (*corev1.Pod, bool) {
+	if k.APIReader == nil {
+		return nil, false
+	}
+	var pods corev1.PodList
+	if err := k.APIReader.List(ctx, &pods,
+		client.InNamespace(namespace), client.MatchingFields{PodIPIndex: ip}); err != nil {
+		return nil, false
+	}
+	return firstLivePod(&pods)
+}
+
+// firstLivePod returns the first non-terminated Pod of a list. Terminated
+// Pods are skipped because their IP may already be recycled.
+func firstLivePod(pods *corev1.PodList) (*corev1.Pod, bool) {
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		// Skip terminated Pods whose IP may already be recycled.
 		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
 		}

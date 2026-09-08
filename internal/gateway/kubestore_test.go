@@ -235,3 +235,39 @@ func TestKubeStore_PodByIP(t *testing.T) {
 		t.Error("unknown IP must miss")
 	}
 }
+
+func TestKubeStore_PodByIPLive(t *testing.T) {
+	ctx := context.Background()
+
+	running := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "fix-pod", Namespace: "team-a"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.5", Phase: corev1.PodRunning},
+	}
+	dead := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "team-a"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.9", Phase: corev1.PodFailed},
+	}
+	live := kubeClientWith(t, running, dead)
+
+	// Nil APIReader disables the fallback.
+	k := &KubeStore{Reader: kubeClientWith(t), OperatorNamespace: "kaalm-system"}
+	if _, ok := k.PodByIPLive(ctx, "team-a", "10.0.0.5"); ok {
+		t.Error("nil APIReader must miss")
+	}
+
+	k = &KubeStore{Reader: kubeClientWith(t), APIReader: live, OperatorNamespace: "kaalm-system"}
+	if p, ok := k.PodByIPLive(ctx, "team-a", "10.0.0.5"); !ok || p.Name != "fix-pod" {
+		t.Errorf("PodByIPLive hit failed: %v %v", p, ok)
+	}
+	// The query is namespace-narrowed: the same IP misses for another
+	// namespace.
+	if _, ok := k.PodByIPLive(ctx, "team-b", "10.0.0.5"); ok {
+		t.Error("live lookup must not match across namespaces")
+	}
+	if _, ok := k.PodByIPLive(ctx, "team-a", "10.0.0.9"); ok {
+		t.Error("terminated Pod must be skipped")
+	}
+	if _, ok := k.PodByIPLive(ctx, "team-a", "10.0.0.250"); ok {
+		t.Error("unknown IP must miss")
+	}
+}

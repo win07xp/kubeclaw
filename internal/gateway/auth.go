@@ -83,6 +83,28 @@ func (a *Authenticator) crossCheck(r *http.Request, namespace string) bool {
 	return pod.Namespace == namespace
 }
 
+// crossCheckLive is crossCheck with the task-complete fallback: an informer
+// miss falls back to a live List narrowed to the SAN-derived namespace, so a
+// Pod completing inside the new-Pod informer-lag window is not rejected with
+// a terminal 401 (workload-identity.md, Informer-lag fallback; #148). The
+// spec scopes the fallback to /v1/task/complete alone: heartbeats are
+// periodic and recover on the next tick, and giving them the fallback would
+// turn an informer resync into a fleet-wide live-List stampede.
+func (a *Authenticator) crossCheckLive(r *http.Request, namespace string) bool {
+	if a.DisableSourceIPCheck {
+		return true
+	}
+	ip := sourceIP(r)
+	pod, ok := a.Store.PodByIP(r.Context(), ip)
+	if !ok {
+		pod, ok = a.Store.PodByIPLive(r.Context(), namespace, ip)
+	}
+	if !ok {
+		return false
+	}
+	return pod.Namespace == namespace
+}
+
 // DualModePaths authenticates the caller-identity profile shared by the LLM
 // proxy and the MCP broker: Mode 1 when a client cert is present (any bearer
 // header is ignored; mTLS wins), Mode 2 (TokenReview bearer, the gateway-only
@@ -143,7 +165,13 @@ func (a *Authenticator) DualModePaths(next http.HandlerFunc) http.HandlerFunc {
 // AgentReportPaths authenticates the mTLS-only report endpoints
 // (/v1/agent/heartbeat, /v1/task/complete). There is no bearer fallback; the
 // Agent-vs-AgentTask split is enforced by requiredKind at the handler level.
+// AgentTask callers (task-complete) get the live cross-check fallback; Agent
+// callers (heartbeat) stay informer-only per the spec (see crossCheckLive).
 func (a *Authenticator) AgentReportPaths(requiredKind WorkloadKind, next http.HandlerFunc) http.HandlerFunc {
+	crossCheck := a.crossCheck
+	if requiredKind == KindAgentTask {
+		crossCheck = a.crossCheckLive
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		cert := peerCert(r)
 		if cert == nil {
@@ -159,7 +187,7 @@ func (a *Authenticator) AgentReportPaths(requiredKind WorkloadKind, next http.Ha
 			forbidden(w, errAccessDenied, string(id.Kind)+" callers are not accepted on this path")
 			return
 		}
-		if !a.crossCheck(r, id.Namespace) {
+		if !crossCheck(r, id.Namespace) {
 			unauthorized(w, "source IP does not match the authenticated namespace")
 			return
 		}

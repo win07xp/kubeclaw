@@ -44,6 +44,13 @@ type Store interface {
 	// PodByIP resolves a source IP to a Pod for the cross-check and the
 	// Mode 2 ownership precheck. ok is false when no Pod matches.
 	PodByIP(ctx context.Context, ip string) (*corev1.Pod, bool)
+	// PodByIPLive resolves a source IP to a Pod with a live apiserver List,
+	// narrowed to one namespace. It is the report-path fallback for the
+	// new-Pod window where the informer has not observed the Pod yet
+	// (docs/src/gateways/api/task-complete.md, cross-check step 2). The
+	// namespace comes from the caller's certificate SAN, so the live query
+	// never searches beyond the namespace the certificate attests.
+	PodByIPLive(ctx context.Context, namespace, ip string) (*corev1.Pod, bool)
 	// ChannelByPath resolves a webhook path to its AgentChannel. Only
 	// channels with Ready=True are returned: Ready gates routing admission.
 	ChannelByPath(ctx context.Context, path string) (*kaalmv1beta1.AgentChannel, bool)

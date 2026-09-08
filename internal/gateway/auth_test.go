@@ -50,6 +50,50 @@ func TestCrossCheck(t *testing.T) {
 	}
 }
 
+func TestCrossCheckLive_Fallback(t *testing.T) {
+	fs := newFakeStore()
+	a := &Authenticator{Store: fs}
+	r, _ := http.NewRequest(http.MethodPost, "/", nil)
+	r.RemoteAddr = "10.0.0.7:5555"
+
+	// Informer miss, live miss: fail.
+	if a.crossCheckLive(r, "team-a") {
+		t.Error("miss on both lookups must fail")
+	}
+	// Informer miss, live hit in the SAN namespace: pass (#148).
+	fs.livePodsByIP["10.0.0.7"] = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a"}}
+	if !a.crossCheckLive(r, "team-a") {
+		t.Error("live fallback hit must pass")
+	}
+	// The live query is namespace-narrowed: the same Pod does not answer for
+	// another namespace.
+	if a.crossCheckLive(r, "team-b") {
+		t.Error("live fallback must not match across namespaces")
+	}
+	// An informer hit still wins without touching the fallback.
+	fs.podsByIP["10.0.0.7"] = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "team-b"}}
+	if a.crossCheckLive(r, "team-a") {
+		t.Error("informer hit in another namespace must fail without fallback rescue")
+	}
+}
+
+// TestHeartbeat_NoLiveFallback locks the spec's scoping: the live fallback
+// belongs to /v1/task/complete alone; a heartbeat from a Pod only the live
+// lookup could see stays a 401 and recovers on the next tick.
+func TestHeartbeat_NoLiveFallback(t *testing.T) {
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {})
+	h.store.livePodsByIP["127.0.0.1"] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sup-pod", Namespace: "team-a"},
+	}
+	cert := h.ca.issue(t, "sup.team-a.svc.cluster.local")
+
+	resp := postJSON(t, h.client(&cert), h.url("/v1/agent/heartbeat"), map[string]any{}, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401: heartbeat must not use the live fallback", resp.StatusCode)
+	}
+}
+
 func TestSourceIP(t *testing.T) {
 	r, _ := http.NewRequest(http.MethodPost, "/", nil)
 	r.RemoteAddr = "192.168.1.5:44321"

@@ -103,6 +103,48 @@ func TestTaskComplete_HappyPath(t *testing.T) {
 	}
 }
 
+// TestTaskComplete_InformerLagLiveFallback covers the new-Pod window (#148):
+// the calling Pod is not in the informer cache yet, but the live
+// namespace-narrowed lookup finds it, so the middleware cross-check and the
+// UID gate both pass and the completion lands.
+func TestTaskComplete_InformerLagLiveFallback(t *testing.T) {
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {})
+	completions := newFakeCompletions()
+	h.server.Completions = completions
+	seedTask(h, "lag-task", nil)
+	// Move the Pod out of the informer view: only the live lookup sees it.
+	h.store.livePodsByIP["127.0.0.1"] = h.store.podsByIP["127.0.0.1"]
+	delete(h.store.podsByIP, "127.0.0.1")
+	cert := h.ca.issue(t, "lag-task.team-a.task.kaalm.io")
+
+	resp := postJSON(t, h.client(&cert), h.url("/v1/task/complete"), map[string]any{
+		"status": "success", "artifacts": map[string]string{"pr-url": "https://example.com/pr/2"},
+	}, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200 via the live fallback", resp.StatusCode)
+	}
+	if completions.patched["team-a/lag-task"] == nil {
+		t.Error("mailbox was not patched")
+	}
+
+	// A live Pod in another namespace does not answer for this caller: the
+	// narrowed query misses and the cross-check stays a 401.
+	seedTask(h, "lag-task-2", nil)
+	other := h.store.podsByIP["127.0.0.1"]
+	other.Namespace = "team-b"
+	h.store.livePodsByIP["127.0.0.1"] = other
+	delete(h.store.podsByIP, "127.0.0.1")
+	cert2 := h.ca.issue(t, "lag-task-2.team-a.task.kaalm.io")
+	resp2 := postJSON(t, h.client(&cert2), h.url("/v1/task/complete"), map[string]any{
+		"status": "success", "artifacts": map[string]string{"pr-url": "https://example.com/pr/3"},
+	}, nil)
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != 401 {
+		t.Fatalf("status %d, want 401 for a cross-namespace live Pod", resp2.StatusCode)
+	}
+}
+
 func TestTaskComplete_Gates(t *testing.T) {
 	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {})
 	completions := newFakeCompletions()

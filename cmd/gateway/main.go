@@ -200,7 +200,9 @@ func main() {
 			"MCP sessions will not survive replica hops")
 	}
 
-	store := &gateway.KubeStore{Reader: cl.GetClient(), OperatorNamespace: operatorNamespace}
+	store := &gateway.KubeStore{
+		Reader: cl.GetClient(), APIReader: cl.GetAPIReader(), OperatorNamespace: operatorNamespace,
+	}
 	tokens := gateway.NewTokenAuthenticator(&gateway.KubeTokenReviewer{Client: clientset})
 	async := &gateway.KubeAsyncRecords{Client: clientset, OperatorNamespace: operatorNamespace}
 	server := gateway.NewServer(gateway.Config{

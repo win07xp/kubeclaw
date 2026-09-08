@@ -120,8 +120,11 @@ type fakeStore struct {
 	providers map[string]*kaalmv1beta1.ModelProvider
 	creds     map[string]string
 	podsByIP  map[string]*corev1.Pod
-	channels  map[string]*kaalmv1beta1.AgentChannel // key: webhook path
-	secrets   map[string]string                     // key: ns/name/key
+	// livePodsByIP backs PodByIPLive: Pods visible to the live fallback but
+	// not the informer, the new-Pod window (#148).
+	livePodsByIP map[string]*corev1.Pod
+	channels     map[string]*kaalmv1beta1.AgentChannel // key: webhook path
+	secrets      map[string]string                     // key: ns/name/key
 
 	toolProviders map[string]*kaalmv1beta1.ToolProvider
 	toolCreds     map[string]string
@@ -129,14 +132,15 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		agents:    map[string]*kaalmv1beta1.Agent{},
-		tasks:     map[string]*kaalmv1beta1.AgentTask{},
-		classes:   map[string]*kaalmv1beta1.AgentClass{},
-		providers: map[string]*kaalmv1beta1.ModelProvider{},
-		creds:     map[string]string{},
-		podsByIP:  map[string]*corev1.Pod{},
-		channels:  map[string]*kaalmv1beta1.AgentChannel{},
-		secrets:   map[string]string{},
+		agents:       map[string]*kaalmv1beta1.Agent{},
+		tasks:        map[string]*kaalmv1beta1.AgentTask{},
+		classes:      map[string]*kaalmv1beta1.AgentClass{},
+		providers:    map[string]*kaalmv1beta1.ModelProvider{},
+		creds:        map[string]string{},
+		podsByIP:     map[string]*corev1.Pod{},
+		livePodsByIP: map[string]*corev1.Pod{},
+		channels:     map[string]*kaalmv1beta1.AgentChannel{},
+		secrets:      map[string]string{},
 
 		toolProviders: map[string]*kaalmv1beta1.ToolProvider{},
 		toolCreds:     map[string]string{},
@@ -185,6 +189,15 @@ func (f *fakeStore) Credential(_ context.Context, p *kaalmv1beta1.ModelProvider)
 func (f *fakeStore) PodByIP(_ context.Context, ip string) (*corev1.Pod, bool) {
 	p, ok := f.podsByIP[ip]
 	return p, ok
+}
+
+// PodByIPLive serves livePodsByIP, narrowed to namespace like production.
+func (f *fakeStore) PodByIPLive(_ context.Context, namespace, ip string) (*corev1.Pod, bool) {
+	p, ok := f.livePodsByIP[ip]
+	if !ok || p.Namespace != namespace {
+		return nil, false
+	}
+	return p, true
 }
 func (f *fakeStore) ChannelByPath(_ context.Context, path string) (*kaalmv1beta1.AgentChannel, bool) {
 	ch, ok := f.channels[path]
