@@ -441,6 +441,100 @@ func TestDiscord_RefusedReplyRecordsCallbackRejected(t *testing.T) {
 	}
 }
 
+// discordCommandWith is discordCommand with caller-chosen reply-context
+// fields, for the crafted-segment tests (#150).
+func discordCommandWith(appID, token, guild, channel, user, message string) []byte {
+	raw, _ := json.Marshal(map[string]any{
+		"id": "1290000000000000001", "application_id": appID, "type": discordInteractionCommand,
+		"token": token, "guild_id": guild, "channel_id": channel,
+		"member": map[string]any{"user": map[string]any{"id": user, "username": "dev"}},
+		"data": map[string]any{"name": "ask", "options": []map[string]any{
+			{"name": "message", "type": 3, "value": message}}},
+	})
+	return raw
+}
+
+func TestDiscordSnowflakeAndTokenShape(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"1230000000000000000", true}, {"9", true},
+		{"", false}, {"123456789012345678901", false}, {"12a", false},
+		{"12/34", false}, {"..", false},
+	} {
+		if got := discordSnowflake(tc.in); got != tc.want {
+			t.Errorf("discordSnowflake(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"tok-abc", true}, {"aW50ZXJhY3Rpb24.token_1-2", true},
+		{"", false}, {"tok/../../evil", false}, {"tok?x=1", false},
+		{"tok#frag", false}, {"tok%2e%2e", false},
+		{strings.Repeat("a", 513), false},
+	} {
+		if got := discordTokenShape(tc.in); got != tc.want {
+			t.Errorf("discordTokenShape(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDiscord_CraftedReplySegmentsAreRefusedBeforeAnyDial: a channel owner
+// controls the verifying key and can sign interactions with arbitrary
+// application ids and tokens; a crafted value must terminate as a refused
+// reply without a single request to the platform API (#150).
+func TestDiscord_CraftedReplySegmentsAreRefusedBeforeAnyDial(t *testing.T) {
+	h := newDiscordHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":"x"}`))
+	})
+	h.send(t, discordCommandWith("1230000000000000000", "tok/../../evil",
+		"123456789012345678", "9", "5", "hi"), nil, "")
+	<-h.agentHits
+	waitFor(t, func() bool {
+		reason, ok := healthReason(h.userHarness, h.channel.Spec.Discord.Path)
+		return !ok && reason == healthReasonCallbackRejected
+	})
+	h.fake.mu.Lock()
+	n := len(h.fake.requests)
+	h.fake.mu.Unlock()
+	if n != 0 {
+		t.Errorf("crafted token still produced %d platform requests", n)
+	}
+}
+
+// TestDiscord_BotFallbackRefusesCraftedChannelID: the bot-token fallback
+// appends the interaction's channel id to the API base; a non-snowflake
+// value is refused before the fallback dials (#150).
+func TestDiscord_BotFallbackRefusesCraftedChannelID(t *testing.T) {
+	h := newDiscordHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":"late"}`))
+	})
+	h.fake.status["PATCH /webhooks/"] = 404
+	h.store.secrets["team-a/disc-creds/botToken"] = "bot-secret"
+	h.send(t, discordCommandWith("1230000000000000000", "tok-abc",
+		"123456789012345678", "987654321098765432/../../evil", "5", "hi"), nil, "")
+	<-h.agentHits
+	first := h.fake.next(t) // the follow-up PATCH that answers 404
+	if first.Method != http.MethodPatch {
+		t.Fatalf("first = %s", first.Method)
+	}
+	waitFor(t, func() bool {
+		reason, ok := healthReason(h.userHarness, h.channel.Spec.Discord.Path)
+		return !ok && reason == healthReasonCallbackRejected
+	})
+	h.fake.mu.Lock()
+	n := len(h.fake.requests)
+	h.fake.mu.Unlock()
+	if n != 1 {
+		t.Errorf("crafted channel id still produced %d platform requests, want the single 404 PATCH", n)
+	}
+}
+
 func TestDiscord_PipelineErrorTravelsAsReplyText(t *testing.T) {
 	h := newDiscordHarness(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) })
 	h.send(t, discordCommand("123456789012345678", "9", "5", "hi"), nil, "")

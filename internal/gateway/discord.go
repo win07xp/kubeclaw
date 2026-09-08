@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -374,6 +375,43 @@ func (d *discordAdapter) apiBaseURL() string {
 	return DefaultDiscordAPIBaseURL
 }
 
+// The reply-context values below travel from the interaction body into
+// platform API URLs. The channel owner controls the verifying public key, so
+// a hostile owner can sign interactions with arbitrary values; each segment
+// is shape-validated before use and path-escaped at the use site so a
+// crafted value cannot traverse the operator-set base URL (#150).
+
+// discordSnowflake reports whether s is shaped like a Discord snowflake id:
+// one to twenty ASCII digits.
+func discordSnowflake(s string) bool {
+	if len(s) == 0 || len(s) > 20 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// discordTokenShape reports whether s is shaped like an interaction token:
+// non-empty, bounded, and limited to the URL-safe alphabet Discord uses.
+func discordTokenShape(s string) bool {
+	if len(s) == 0 || len(s) > 512 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '_', c == '-', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // SendReply edits the deferred message with the first chunk and posts the
 // rest as follow-ups. Past the token window, or on a 404 from the follow-up
 // webhook, it switches to channel messages when botToken is configured.
@@ -387,19 +425,24 @@ func (d *discordAdapter) SendReply(
 	if text == "" {
 		text = discordEmptyReply
 	}
+	if !discordSnowflake(rc.applicationID) || !discordTokenShape(rc.token) {
+		return d.s.replyRefused(channel, "discord", replyResult{
+			bucket: bucketTerminal,
+			body:   []byte("interaction application id or token failed shape validation")})
+	}
 	chunks := splitChunks(text, discordChunkLimit)
 	if time.Since(rc.received) > discordTokenWindow {
 		return d.sendViaBot(ctx, channel, rc, chunks, "interaction token expired")
 	}
 	base := d.apiBaseURL()
-	webhook := fmt.Sprintf("%s/webhooks/%s/%s", base, rc.applicationID, rc.token)
+	webhook := fmt.Sprintf("%s/webhooks/%s/%s", base, url.PathEscape(rc.applicationID), url.PathEscape(rc.token))
 	for i, chunk := range chunks {
-		method, url := http.MethodPost, webhook
+		method, target := http.MethodPost, webhook
 		if i == 0 {
-			method, url = http.MethodPatch, webhook+"/messages/@original"
+			method, target = http.MethodPatch, webhook+"/messages/@original"
 		}
 		res := d.s.sendPlatformRequest(ctx, func(ctx context.Context) (*http.Request, error) {
-			return discordJSONRequest(ctx, method, url, "", discordMessageBody{Content: chunk})
+			return discordJSONRequest(ctx, method, target, "", discordMessageBody{Content: chunk})
 		}, func(status int, _ []byte) replyBucket { return classifyReplyStatus(status) })
 		if res.bucket == bucketDelivered {
 			continue
@@ -417,20 +460,25 @@ func (d *discordAdapter) SendReply(
 func (d *discordAdapter) sendViaBot(
 	ctx context.Context, channel *kaalmv1beta1.AgentChannel, rc discordReply, chunks []string, why string,
 ) string {
+	if !discordSnowflake(rc.channelID) {
+		return d.s.replyRefused(channel, "discord", replyResult{
+			bucket: bucketTerminal,
+			body:   []byte(why + " and the interaction channel id failed shape validation")})
+	}
 	token, err := d.s.Store.SecretValue(ctx, channel.Namespace, channel.Spec.Discord.CredentialsRef.Name, discordKeyBotToken)
 	if err != nil || token == "" {
 		return d.s.replyRefused(channel, "discord", replyResult{
 			bucket: bucketTerminal, status: http.StatusNotFound,
 			body: []byte(why + " and no botToken is configured")})
 	}
-	url := fmt.Sprintf("%s/channels/%s/messages", d.apiBaseURL(), rc.channelID)
+	messagesURL := fmt.Sprintf("%s/channels/%s/messages", d.apiBaseURL(), url.PathEscape(rc.channelID))
 	for _, chunk := range chunks {
 		body := discordMessageBody{
 			Content:         "<@" + rc.userID + "> " + chunk,
 			AllowedMentions: &discordAllowedMentions{Users: []string{rc.userID}},
 		}
 		res := d.s.sendPlatformRequest(ctx, func(ctx context.Context) (*http.Request, error) {
-			return discordJSONRequest(ctx, http.MethodPost, url, "Bot "+token, body)
+			return discordJSONRequest(ctx, http.MethodPost, messagesURL, "Bot "+token, body)
 		}, func(status int, _ []byte) replyBucket { return classifyReplyStatus(status) })
 		if res.bucket != bucketDelivered {
 			return d.s.replyRefused(channel, "discord", res)
