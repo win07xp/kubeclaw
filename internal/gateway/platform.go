@@ -265,11 +265,29 @@ func (s *Server) sendPlatformRequest(
 	return last
 }
 
+// maxReplyRefusalDetail bounds how much of a platform API's response body a
+// refusal detail quotes. The detail reaches etcd twice, as the Warning event
+// and through the channel health condition, so the quote stays a prefix just
+// long enough to carry a Discord or Meta error code, never a 64 KiB body
+// (#151).
+const maxReplyRefusalDetail = 512
+
+// truncatedReplyBody renders a platform response body for a refusal detail:
+// trimmed, bounded, and reduced to valid UTF-8, since an arbitrary endpoint
+// can answer arbitrary bytes and etcd objects must stay valid strings.
+func truncatedReplyBody(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > maxReplyRefusalDetail {
+		s = s[:maxReplyRefusalDetail] + "... (truncated)"
+	}
+	return strings.ToValidUTF8(s, "")
+}
+
 // replyRefused records a terminal or exhausted reply on channel health as
 // CallbackRejected, emits the Warning event, and maps it to the callback
 // outcome vocabulary.
 func (s *Server) replyRefused(channel *kaalmv1beta1.AgentChannel, platform string, res replyResult) string {
-	detail := fmt.Sprintf("%s reply refused: HTTP %d %s", platform, res.status, strings.TrimSpace(string(res.body)))
+	detail := fmt.Sprintf("%s reply refused: HTTP %d %s", platform, res.status, truncatedReplyBody(res.body))
 	outcome := callbackRejected
 	if res.bucket == bucketRetried {
 		outcome = callbackExhausted
