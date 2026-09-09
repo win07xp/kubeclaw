@@ -5,9 +5,6 @@
 package main
 
 import (
-	"bytes"
-	"io"
-	"log/slog"
 	"reflect"
 	"testing"
 	"time"
@@ -39,42 +36,50 @@ func TestParseBackoff(t *testing.T) {
 			raw:  " 1s , 5s ,25s ",
 			want: []time.Duration{time.Second, 5 * time.Second, 25 * time.Second},
 		},
-		{
-			name: "malformed entries are skipped, valid ones kept",
-			raw:  "1s,not-a-duration,25s",
-			want: []time.Duration{time.Second, 25 * time.Second},
-		},
-		{
-			name: "all malformed entries yields an empty (non-nil) slice",
-			raw:  "garbage,more-garbage",
-			want: []time.Duration{},
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			got := parseBackoff(tt.raw, logger)
+			got, err := parseBackoff(tt.raw)
+			if err != nil {
+				t.Fatalf("parseBackoff(%q) errored: %v", tt.raw, err)
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("parseBackoff(%q) = %#v, want %#v", tt.raw, got, tt.want)
 			}
 		})
 	}
+
+	// A malformed entry is a startup error, never a silently shortened
+	// schedule (#155).
+	for _, raw := range []string{"1s,not-a-duration,25s", "garbage"} {
+		if _, err := parseBackoff(raw); err == nil {
+			t.Errorf("parseBackoff(%q) must error", raw)
+		}
+	}
 }
 
-func TestParseBackoffLogsMalformedEntries(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	got := parseBackoff("1s,bogus", logger)
-
-	if want := []time.Duration{time.Second}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("parseBackoff = %#v, want %#v", got, want)
+func TestValidatePlatformBaseURL(t *testing.T) {
+	for _, ok := range []string{
+		"https://discord.com/api/v10",
+		"https://graph.facebook.com/v23.0",
+		"http://mockdiscord.kaalm-e2e.svc:8080",
+	} {
+		if err := validatePlatformBaseURL(ok); err != nil {
+			t.Errorf("validatePlatformBaseURL(%q) = %v, want nil", ok, err)
+		}
 	}
-	if !bytes.Contains(buf.Bytes(), []byte("ignoring malformed backoff entry")) {
-		t.Errorf("expected a warning to be logged for the malformed entry, got log output: %s", buf.String())
-	}
-	if !bytes.Contains(buf.Bytes(), []byte("bogus")) {
-		t.Errorf("expected the log to mention the offending value %q, got: %s", "bogus", buf.String())
+	for _, bad := range []string{
+		"",
+		"discord.com/api",        // no scheme
+		"ftp://discord.com",      // wrong scheme
+		"https://",               // no host
+		"https://h.example?x=1",  // query
+		"https://h.example#frag", // fragment
+		"https://h .example/api", // unparseable
+	} {
+		if err := validatePlatformBaseURL(bad); err == nil {
+			t.Errorf("validatePlatformBaseURL(%q) must error", bad)
+		}
 	}
 }
