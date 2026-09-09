@@ -39,6 +39,17 @@ func TestPolicy_DefaultDeniesInternalAllowsPublic(t *testing.T) {
 		{"169.254.169.254", false},
 		{"fe80::1", false},
 		{"0.0.0.0", false},
+		// Internal-in-practice space outside net.IP.IsPrivate (rule 22, #154):
+		// RFC 6598 shared address space and RFC 2544 benchmarking space,
+		// including the IPv4-in-IPv6 form a dual-stack resolver can return.
+		{"100.64.0.1", false},
+		{"100.127.255.254", false},
+		{"::ffff:100.64.0.1", false},
+		{"198.18.0.5", false},
+		{"198.19.255.254", false},
+		// The neighbors just outside both ranges stay public.
+		{"100.128.0.1", true},
+		{"198.20.0.1", true},
 	}
 	for _, c := range cases {
 		if got := p.Allowed("receiver.example.com", net.ParseIP(c.ip)); got != c.want {
@@ -82,6 +93,19 @@ func TestPolicy_CIDREntryOpensPrivateTarget(t *testing.T) {
 // The floor is the security-relevant property: an operator can open internal
 // network space, but cannot allowlist their way back to loopback or the cloud
 // metadata endpoint.
+// TestPolicy_AllowlistOpensSharedAddressSpace: the new ranges sit in the
+// deniable tier, so an operator who runs Pods in 100.64.0.0/10 can open the
+// space deliberately, unlike the loopback and link-local floor.
+func TestPolicy_AllowlistOpensSharedAddressSpace(t *testing.T) {
+	p := New([]string{"100.64.0.0/10"})
+	if !p.Allowed("receiver.internal", net.ParseIP("100.64.7.7")) {
+		t.Error("an allowlisted shared-space CIDR must open it")
+	}
+	if p.Allowed("receiver.internal", net.ParseIP("198.18.0.5")) {
+		t.Error("benchmarking space stays denied without its own entry")
+	}
+}
+
 func TestPolicy_FloorHoldsAgainstExplicitAllowlist(t *testing.T) {
 	p := New([]string{"169.254.169.254/32", "127.0.0.0/8", "::1/128", "0.0.0.0/0", "metadata.internal"})
 
