@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"net/http"
+	"net/url"
 
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -185,6 +186,8 @@ func main() {
 		validateCABundle(file, "callback", logger)
 	}
 
+	callbackPolicy := parseStartupPolicy(callbackAllowlist, discordAPIBaseURL, whatsAppAPIBaseURL, logger)
+
 	// The MCP session key binds session ids to caller identities across
 	// replicas; the chart provides it. A missing key gets a per-process
 	// random fallback: sessions then survive only on this replica, which is
@@ -217,7 +220,7 @@ func main() {
 		SessionKey:               sessionKey,
 		UpstreamCAFiles:          splitPaths(upstreamCAFile),
 		CallbackCAFiles:          splitPaths(callbackCAFile),
-		CallbackPolicy:           callbackpolicy.NewFromCSV(callbackAllowlist),
+		CallbackPolicy:           callbackPolicy,
 		DisableSourceIPCheck:     disableSourceIPCheck,
 		UserListenAddr:           userAddr,
 		AgentServiceHostOverride: agentHostOverride,
@@ -229,8 +232,8 @@ func main() {
 		AgentReadTimeout:         agentReadTimeout,
 		AgentConnectTimeout:      agentConnectTimeout,
 		ChannelHealthWindow:      channelHealthWindow,
-		DeliveryBackoff:          parseBackoff(deliveryBackoff, logger),
-		CallbackBackoff:          parseBackoff(callbackBackoff, logger),
+		DeliveryBackoff:          mustParseBackoff(deliveryBackoff, "delivery-backoff", logger),
+		CallbackBackoff:          mustParseBackoff(callbackBackoff, "callback-backoff", logger),
 		DiscordAPIBaseURL:        discordAPIBaseURL,
 		WhatsAppAPIBaseURL:       whatsAppAPIBaseURL,
 		Replicas: func() int {
@@ -393,21 +396,71 @@ func validateCABundle(file, kind string, logger *slog.Logger) {
 	}
 }
 
-func parseBackoff(raw string, logger *slog.Logger) []time.Duration {
+func parseBackoff(raw string) ([]time.Duration, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	parts := strings.Split(raw, ",")
 	out := make([]time.Duration, 0, len(parts))
 	for _, part := range parts {
 		d, err := time.ParseDuration(strings.TrimSpace(part))
 		if err != nil {
-			logger.Warn("ignoring malformed backoff entry", "value", part, "error", err)
-			continue
+			// A skipped entry would silently shorten the retry schedule;
+			// failing startup keeps the schedule exactly what the operator
+			// wrote (#155).
+			return nil, fmt.Errorf("malformed backoff entry %q: %w", part, err)
 		}
 		out = append(out, d)
 	}
+	return out, nil
+}
+
+// parseStartupPolicy applies the strict-parse contract (#155) to the
+// Helm-derived flags whose misreads would otherwise half-apply: a malformed
+// value fails startup. otlpEndpoint gets the same treatment inside
+// NewTracing, and the CA bundle paths inside validateCABundle.
+func parseStartupPolicy(
+	callbackAllowlist, discordBaseURL, whatsAppBaseURL string, logger *slog.Logger,
+) callbackpolicy.Policy {
+	policy, err := callbackpolicy.NewFromCSVStrict(callbackAllowlist)
+	if err != nil {
+		logger.Error("parsing --callback-url-allowlist", "error", err)
+		os.Exit(1)
+	}
+	for flagName, value := range map[string]string{
+		"platform-discord-api-base-url":  discordBaseURL,
+		"platform-whatsapp-api-base-url": whatsAppBaseURL,
+	} {
+		if err := validatePlatformBaseURL(value); err != nil {
+			logger.Error("malformed platform base URL", "flag", flagName, "value", value, "error", err)
+			os.Exit(1)
+		}
+	}
+	return policy
+}
+
+// mustParseBackoff is parseBackoff with the startup-failure contract.
+func mustParseBackoff(raw, flagName string, logger *slog.Logger) []time.Duration {
+	out, err := parseBackoff(raw)
+	if err != nil {
+		logger.Error("parsing backoff schedule", "flag", flagName, "error", err)
+		os.Exit(1)
+	}
 	return out
+}
+
+// validatePlatformBaseURL rejects a malformed platform base URL: reply URLs
+// are built by appending path segments to it, so a bad value would otherwise
+// surface only as delivery failures at runtime (#155).
+func validatePlatformBaseURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil {
+		return err
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("need http(s)://host[/path] with no query or fragment, got %q", value)
+	}
+	return nil
 }
 
 // setupTracing wires the OTLP exporter when an endpoint is configured and

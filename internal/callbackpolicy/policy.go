@@ -22,6 +22,7 @@ limitations under the License.
 package callbackpolicy
 
 import (
+	"fmt"
 	"net"
 	"strings"
 )
@@ -54,8 +55,67 @@ func New(entries []string) Policy {
 	return p
 }
 
-// NewFromCSV builds a Policy from a comma-separated flag value.
-func NewFromCSV(csv string) Policy { return New(strings.Split(csv, ",")) }
+// NewFromCSVStrict builds a Policy from a comma-separated flag value and
+// rejects entries the lenient constructor would silently misread (#155): an
+// entry containing "/" must parse as a CIDR, because a typo'd CIDR would
+// otherwise demote to a DNS suffix that never matches; a bare IP address
+// becomes a single-address CIDR so it matches by resolved address; anything
+// else must be shaped like a DNS-name suffix. A malformed entry is a startup
+// error, never a half-applied allowlist.
+func NewFromCSVStrict(csv string) (Policy, error) {
+	var entries []string
+	for _, raw := range strings.Split(csv, ",") {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return Policy{}, fmt.Errorf("allowlist entry %q is not a valid CIDR: %w", entry, err)
+			}
+			entries = append(entries, entry)
+			continue
+		}
+		if ip := net.ParseIP(entry); ip != nil {
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			entries = append(entries, fmt.Sprintf("%s/%d", entry, bits))
+			continue
+		}
+		if !dnsSuffixShaped(strings.TrimPrefix(entry, ".")) {
+			return Policy{}, fmt.Errorf("allowlist entry %q is neither a CIDR nor a DNS-name suffix", entry)
+		}
+		entries = append(entries, entry)
+	}
+	return New(entries), nil
+}
+
+// dnsSuffixShaped reports whether s is shaped like a DNS name: dot-separated
+// labels of letters, digits, and interior hyphens, at most 253 bytes.
+func dnsSuffixShaped(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for i, c := range label {
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			case c == '-':
+				if i == 0 || i == len(label)-1 {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // internalInPractice holds address space that is internal in real clusters
 // but outside net.IP.IsPrivate: RFC 6598 shared address space (100.64.0.0/10,

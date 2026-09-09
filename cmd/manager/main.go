@@ -341,12 +341,19 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentTask")
 		os.Exit(1)
 	}
+	// Must parse strictly and identically to the gateway's flag (#155).
+	managerCallbackPolicy, err := callbackpolicy.NewFromCSVStrict(callbackAllowlist)
+	if err != nil {
+		setupLog.Error(err, "parsing --callback-url-allowlist")
+		os.Exit(1)
+	}
+
 	if err := (&controller.AgentChannelReconciler{
 		Client:            mgr.GetClient(),
 		Recorder:          mgr.GetEventRecorderFor("agentchannel-controller"),
 		OperatorNamespace: operatorNamespace,
 		Health:            channelHealthClient,
-		CallbackPolicy:    callbackpolicy.NewFromCSV(callbackAllowlist),
+		CallbackPolicy:    managerCallbackPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentChannel")
 		os.Exit(1)

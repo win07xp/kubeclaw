@@ -122,8 +122,11 @@ func TestPolicy_FloorHoldsAgainstExplicitAllowlist(t *testing.T) {
 	}
 }
 
-func TestNewFromCSV(t *testing.T) {
-	p := NewFromCSV(" .svc.cluster.local , 10.43.0.0/16 ,, ")
+func TestNewFromCSVStrict(t *testing.T) {
+	p, err := NewFromCSVStrict(" .svc.cluster.local , 10.43.0.0/16 ,, ")
+	if err != nil {
+		t.Fatalf("valid CSV rejected: %v", err)
+	}
 	if !p.Allowed("a.svc.cluster.local", net.ParseIP("10.9.9.9")) {
 		t.Error("CSV suffix entry not applied")
 	}
@@ -132,5 +135,34 @@ func TestNewFromCSV(t *testing.T) {
 	}
 	if p.Allowed("other.internal", net.ParseIP("192.168.1.1")) {
 		t.Error("blank CSV entries must not widen the policy")
+	}
+
+	// A bare IP entry becomes a single-address CIDR: it matches by resolved
+	// address, whatever hostname the callbackUrl used.
+	p, err = NewFromCSVStrict("192.168.7.7, fd12::7")
+	if err != nil {
+		t.Fatalf("bare IP entries rejected: %v", err)
+	}
+	if !p.Allowed("receiver.internal", net.ParseIP("192.168.7.7")) {
+		t.Error("bare IPv4 entry must match by address")
+	}
+	if !p.Allowed("receiver.internal", net.ParseIP("fd12::7")) {
+		t.Error("bare IPv6 entry must match by address")
+	}
+	if p.Allowed("receiver.internal", net.ParseIP("192.168.7.8")) {
+		t.Error("a single-address entry must not widen to neighbors")
+	}
+
+	// Malformed entries fail instead of half-applying (#155).
+	for _, bad := range []string{
+		"10.0.0/8",          // typo'd CIDR: contains "/" but does not parse
+		"192.168.0.0/33",    // impossible mask
+		"svc cluster local", // spaces are neither CIDR nor DNS
+		"bad_host",          // underscore is not a DNS label character
+		"-leading.example",  // label starts with a hyphen
+	} {
+		if _, err := NewFromCSVStrict(bad); err == nil {
+			t.Errorf("entry %q must be rejected", bad)
+		}
 	}
 }
