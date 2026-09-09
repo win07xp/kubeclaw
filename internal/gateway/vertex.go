@@ -23,26 +23,21 @@ import (
 	"strings"
 )
 
-// Google Vertex (Gemini) adapter. Vertex is the one format that names the
-// model in the URL path rather than the request body, does not accept static
-// API keys (the credential is a service-account JSON key the ModelProvider
-// reconciler and gateway mint OAuth2 tokens from), and returns a JSON-array
-// stream unless ?alt=sse is present. See
-// docs/src/gateways/llm/provider-routing.md and request-handling.md.
-
-// isVertexPath matches the :generateContent / :streamGenerateContent method
-// suffix, since Vertex paths embed project and location segments.
-func isVertexPath(p string) bool {
-	return strings.HasSuffix(p, ":generateContent") || strings.HasSuffix(p, ":streamGenerateContent")
-}
+// The adapter for the RESERVED google-vertex type (#147): no inbound path is
+// routed and the OAuth2 token minting the platform requires is not
+// implemented, so the type is not servable in this release. The outbound
+// pieces below (usage extraction, URL-path model rewriting, the ?alt=sse
+// fixup) stay for the finished feature. The platform's product name is now
+// the Gemini Enterprise Agent Platform; the wire API and the enum value are
+// unchanged. See request-handling.md, The google-vertex type is reserved.
 
 type vertexAdapter struct{}
 
 func (vertexAdapter) formatName() string { return providerTypeVertex }
 
-// injectCredential attaches the OAuth2 access token. The credential passed in
-// is already the minted bearer token (the Store resolves the SA key to a token
-// via the VertexTokenSource seam).
+// injectCredential attaches a bearer token. Serving the type requires an
+// OAuth2 access token minted from a GCP service-account key, which this
+// release does not implement; the Store hands over the raw Secret value.
 func (vertexAdapter) injectCredential(h http.Header, credential string) {
 	h.Set("Authorization", "Bearer "+credential)
 }

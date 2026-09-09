@@ -41,8 +41,9 @@ func (u Usage) isZero() bool {
 
 // providerAdapter carries the per-provider knowledge: request-format paths,
 // credential header shape, usage extraction (buffered and streamed), and
-// streaming request fixups. Anthropic and OpenAI/OpenAI-compatible ship in
-// Phase 5; Vertex lands in the hardening phase.
+// streaming request fixups. Anthropic and OpenAI/OpenAI-compatible are the
+// served types; google-vertex is reserved (#147) and keeps only its
+// outbound adapter pieces.
 type providerAdapter interface {
 	// formatName identifies the request format for logs and metrics.
 	formatName() string
@@ -72,10 +73,10 @@ func adapterForPath(urlPath string) (providerAdapter, bool) {
 	case "/v1/chat/completions", "/v1/completions":
 		return openaiAdapter{}, true
 	}
-	// Vertex embeds project/location; match on the method suffix.
-	if isVertexPath(path) {
-		return vertexAdapter{}, true
-	}
+	// No Vertex-format path is routed: google-vertex is a reserved type in
+	// this release (request-handling.md, The google-vertex type is reserved;
+	// #147). The mux never routes anything else here either; this guard is
+	// for handler-level callers.
 	return nil, false
 }
 
