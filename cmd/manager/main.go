@@ -369,7 +369,11 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		mgr.GetWebhookServer().Register("/convert", webhookconversion.NewWebhookHandler(mgr.GetScheme()))
+		// The body cap is the deny half of the listener's posture: conversion
+		// is a pure function with nothing to extract, but the handler decodes
+		// without a limit and the port requires no client auth (#152).
+		mgr.GetWebhookServer().Register("/convert", controller.MaxBytesHandler(
+			webhookconversion.NewWebhookHandler(mgr.GetScheme()), controller.MaxConversionBodyBytes))
 		// A replica is Ready only once the conversion listener is up, so the
 		// Service never routes a conversion to a replica that cannot answer.
 		if err := mgr.AddReadyzCheck("conversion-webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
