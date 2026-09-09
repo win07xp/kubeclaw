@@ -25,6 +25,11 @@ jobs:
           make manifests generate
           git diff --exit-code || (echo "::error::run 'make manifests generate' and commit the result" && exit 1)
 
+      - name: Audit drift report (non-blocking; see hack/audit/manifest.txt)
+        run: |
+          git fetch --no-tags --depth=200 origin main
+          make audit-drift || echo "::warning::audit verdicts drifted; re-walk them and re-stamp hack/audit/manifest.txt before the next release"
+
       - name: Build binaries
         run: make build
 
