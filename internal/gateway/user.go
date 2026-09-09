@@ -459,26 +459,23 @@ func (s *Server) agentHTTPClient(agent *kaalmv1beta1.Agent) (*http.Client, error
 }
 
 // NewControllerActivator builds the production activator client from the
-// gateway's own TLS identity, pinned to the controller Service DNS.
+// gateway's own TLS identity, pinned to the controller Service DNS. Wake
+// dials re-read the certificate and trust pool per connection so leaf and CA
+// rotation apply without a gateway restart (#149).
 func NewControllerActivator(operatorNamespace, certFile, keyFile, caFile string) (*ControllerActivator, error) {
 	loader := &tlsutil.CertLoader{CertFile: certFile, KeyFile: keyFile, CAFile: caFile}
-	cert, err := loader.Certificate()
-	if err != nil {
+	if _, err := loader.Certificate(); err != nil {
 		return nil, err
 	}
-	pool, err := loader.CAPool()
-	if err != nil {
+	if _, err := loader.CAPool(); err != nil {
 		return nil, err
 	}
 	host := fmt.Sprintf("kaalm-controller.%s.svc.cluster.local", operatorNamespace)
 	return &ControllerActivator{
 		BaseURL: fmt.Sprintf("https://%s:9443", host),
 		Client: &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12, RootCAs: pool,
-				Certificates: []tls.Certificate{*cert}, ServerName: host,
-			}},
+			Timeout:   10 * time.Second,
+			Transport: &http.Transport{DialTLSContext: loader.DialTLSContext(host)},
 		},
 	}, nil
 }

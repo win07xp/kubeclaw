@@ -22,9 +22,11 @@ limitations under the License.
 package tlsutil
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -144,4 +146,67 @@ func (l *CertLoader) Certificate() (*tls.Certificate, error) {
 func (l *CertLoader) CAPool() (*x509.CertPool, error) {
 	l.caOnce.Do(func() { l.ca = &CAPoolLoader{Files: []string{l.CAFile}} })
 	return l.ca.Load()
+}
+
+// DialTLSContext returns an http.Transport DialTLSContext for an mTLS client
+// that re-reads the client certificate and trust pool per connection, so leaf
+// and CA rotation apply without a process restart. Pooled connections keep
+// their handshake until recycled; new connections use the current material.
+// serverName pins SAN verification when the dial address is not the identity
+// to verify (Pod-IP dials); empty pins to the address's host.
+func (l *CertLoader) DialTLSContext(serverName string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		cert, err := l.Certificate()
+		if err != nil {
+			return nil, err
+		}
+		pool, err := l.CAPool()
+		if err != nil {
+			return nil, err
+		}
+		name := serverName
+		if name == "" {
+			if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
+				name = host
+			} else {
+				name = addr
+			}
+		}
+		dialer := &tls.Dialer{Config: &tls.Config{
+			MinVersion: tls.VersionTLS12, RootCAs: pool,
+			Certificates: []tls.Certificate{*cert}, ServerName: name,
+		}}
+		return dialer.DialContext(ctx, network, addr)
+	}
+}
+
+// ServerMTLSConfig builds a listener TLS config over the loader: the serving
+// certificate is re-read per handshake and the ClientCAs pool is rebuilt per
+// connection, the same pattern the gateway's cluster listener uses, so a
+// rotated CA bundle applies without a restart.
+func (l *CertLoader) ServerMTLSConfig(clientAuth tls.ClientAuthType) (*tls.Config, error) {
+	if _, err := l.Certificate(); err != nil {
+		return nil, err
+	}
+	pool, err := l.CAPool()
+	if err != nil {
+		return nil, err
+	}
+	base := func(pool *x509.CertPool) *tls.Config {
+		return &tls.Config{
+			MinVersion: tls.VersionTLS12, ClientAuth: clientAuth, ClientCAs: pool,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return l.Certificate()
+			},
+		}
+	}
+	cfg := base(pool)
+	cfg.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		pool, err := l.CAPool()
+		if err != nil {
+			return nil, err
+		}
+		return base(pool), nil
+	}
+	return cfg, nil
 }
