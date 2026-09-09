@@ -98,7 +98,7 @@ The operator emits Kubernetes Events for:
 - Every budget threshold crossing.
 - Every credential rotation.
 
-Since v0.7.0 the gateway also emits `Warning` events on the resources it governs at runtime: `FallbackIneligible` and `CredentialsInvalid` on a ModelProvider during a fallback walk, and `CallbackRejected` on an AgentChannel when a callback receiver or a platform refuses a reply. See [Gateway ServiceAccount permissions](rbac.md#gateway-serviceaccount-permissions) for the grant that carries them.
+Since v0.7.0 the gateway also emits `Warning` events on the resources it governs at runtime: `FallbackIneligible` and `CredentialsInvalid` on a ModelProvider during a fallback walk, and `CallbackRejected` on an AgentChannel when a callback receiver or a platform refuses a reply. Event messages carry reasons and status codes, never credential material, and a `CallbackRejected` detail quotes at most a short bounded prefix of the platform's response body. See [Gateway ServiceAccount permissions](rbac.md#gateway-serviceaccount-permissions) for the grant that carries them.
 
 Events persist in etcd per the cluster's Event retention. For long-term audit, platform teams should ship events to an external audit log (standard k8s audit logging, Falco, etc.).
 

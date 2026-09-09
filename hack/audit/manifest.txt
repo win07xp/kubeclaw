@@ -1,0 +1,44 @@
+# The audit manifest for the listener authz and SSRF audit (#139).
+#
+# Line format: <verdict-id> <pathspec> [<pathspec>...]
+# Every verdict of the audit's closing record names the files it examined;
+# this file is the machine-readable half. hack/audit/drift-check.sh diffs
+# each verdict's paths from the audited commit below: an empty diff means
+# the verdict stands, a non-empty one names exactly what to re-walk. New
+# surfaces a release adds have no baseline here and get walked when they
+# appear.
+#
+# audited-commit: 1ca3f69
+1.1 internal/gateway/auth.go internal/gateway/tokenauth.go internal/gateway/kubestore.go internal/gateway/server.go internal/gateway/store.go
+1.2 internal/gateway/proxy.go
+1.3 internal/gateway/proxy.go internal/gateway/fallback.go
+1.4 internal/gateway/routing.go internal/gateway/proxy.go internal/gateway/fallback.go
+1.5 internal/gateway/proxy.go internal/gateway/fallback.go
+1.6 internal/gateway/mcpbroker.go internal/gateway/mcpsession.go internal/gateway/server.go internal/mcp/
+1.7 internal/gateway/auth.go internal/gateway/identity.go internal/gateway/completion.go internal/gateway/activity.go internal/gateway/kubestore.go
+1.8 internal/gateway/auth.go internal/gateway/identity.go internal/gateway/activity.go internal/gateway/spend.go internal/gateway/testchat.go
+1.9 internal/gateway/server.go
+1.10 internal/gateway/server.go internal/gateway/adapters.go internal/gateway/vertex.go internal/gateway/fallback.go
+2.1 internal/gateway/user.go internal/gateway/platform.go
+2.2 internal/gateway/channelauth.go internal/gateway/user.go
+2.3 internal/gateway/discord.go
+2.4 internal/gateway/whatsapp.go internal/gateway/channelauth.go
+2.5 internal/gateway/async.go internal/gateway/channelauth.go
+2.6 internal/gateway/user.go
+3.1 internal/gateway/server.go cmd/gateway/main.go internal/gateway/metrics.go internal/gateway/mcpbroker.go
+3.2 internal/controller/activator.go cmd/manager/main.go internal/tlsutil/loader.go
+3.3 cmd/manager/main.go internal/controller/webhookbody.go
+3.4 internal/console/
+3.5 agentruntime/agent.go images/agent-python/kaalm_agent/__main__.py images/agent-python/kaalm_agent/tls.py
+4.1 internal/gateway/server.go internal/gateway/proxy.go internal/controller/health.go internal/controller/probe_client.go
+4.2 internal/gateway/async.go internal/callbackpolicy/policy.go
+4.3 internal/gateway/mcpbroker.go internal/gateway/server.go
+4.4 internal/gateway/discord.go internal/gateway/whatsapp.go internal/gateway/platform.go
+4.5 internal/gateway/tracing.go
+4.6 internal/gateway/user.go
+4.7 internal/gateway/user.go internal/controller/agent_activity.go internal/controller/agentchannel_health.go internal/controller/health.go
+5.1 internal/gateway/channelauth.go internal/gateway/whatsapp.go internal/gateway/mcpsession.go
+5.2 internal/gateway/server.go internal/tlsutil/loader.go internal/gateway/async.go internal/gateway/platform.go
+5.3 internal/gateway/fallback.go internal/gateway/platform.go
+5.4 internal/gateway/bodylog.go internal/gateway/mcpbroker.go internal/gateway/errors.go
+5.5 cmd/gateway/main.go internal/callbackpolicy/policy.go internal/gateway/tracing.go

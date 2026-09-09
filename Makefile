@@ -106,6 +106,10 @@ lint-fix: golangci-lint ## Run golangci-lint with fixes on every workspace modul
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+.PHONY: audit-drift
+audit-drift: ## Report which #139 audit verdicts need a re-walk (hack/audit/manifest.txt).
+	hack/audit/drift-check.sh
+
 ##@ Build
 
 .PHONY: build
