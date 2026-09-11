@@ -163,6 +163,15 @@ type Server struct {
 
 	callbackClientOnce sync.Once
 	callbackClient     *http.Client
+
+	// AgentResolver resolves agent Service names for delivery dials; nil
+	// means net.DefaultResolver. Tests inject a counting fake.
+	AgentResolver ipResolver
+}
+
+// ipResolver is the slice of net.Resolver the delivery dialer uses.
+type ipResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 // initOutboundCAs builds the file-backed outbound trust loaders once.

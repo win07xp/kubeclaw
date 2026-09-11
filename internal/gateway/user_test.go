@@ -788,6 +788,8 @@ func TestDeliverToAgentRedialsWithinTheAttempt(t *testing.T) {
 		DeliveryBackoff: []time.Duration{time.Millisecond},
 	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
 	s.Metrics = NewMetrics(prometheus.NewRegistry())
+	resolver := &countingResolver{ip: net.ParseIP("192.0.2.1")}
+	s.AgentResolver = resolver
 
 	start := time.Now()
 	_, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: "m1"})
@@ -801,4 +803,61 @@ func TestDeliverToAgentRedialsWithinTheAttempt(t *testing.T) {
 	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeConnect)); got != 2 {
 		t.Errorf("connect outcomes = %v, want 2 (last error %q classified %q)", got, err, deliveryOutcome(err))
 	}
+	// One resolution per attempt, however many connects the attempt redials.
+	if got := atomic.LoadInt32(&resolver.calls); got != 2 {
+		t.Errorf("resolver called %d times for 2 attempts, want 2", got)
+	}
+}
+
+// countingResolver answers every lookup with one IP and counts the calls.
+type countingResolver struct {
+	ip    net.IP
+	calls int32
+}
+
+func (r *countingResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	atomic.AddInt32(&r.calls, 1)
+	return []net.IPAddr{{IP: r.ip}}, nil
+}
+
+func TestAbsoluteDialName(t *testing.T) {
+	cases := map[string]string{
+		"sup.team-a.svc.cluster.local":  "sup.team-a.svc.cluster.local.",
+		"sup.team-a.svc.cluster.local.": "sup.team-a.svc.cluster.local.",
+		"10.0.0.5":                      "10.0.0.5",
+		"::1":                           "::1",
+		"":                              "",
+	}
+	for in, want := range cases {
+		if got := absoluteDialName(in); got != want {
+			t.Errorf("absoluteDialName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDeliverToAgentResolutionTimeoutIsDNS(t *testing.T) {
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	s := NewServer(Config{
+		OperatorNamespace: "kaalm-system", InsecureSkipAgentVerify: true,
+		AgentReadTimeout: 200 * time.Millisecond, AgentConnectTimeout: 50 * time.Millisecond,
+		DeliveryBackoff: []time.Duration{time.Millisecond},
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+	s.AgentResolver = &stallingResolver{}
+
+	if _, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: "m1"}); err == nil {
+		t.Fatal("delivery with a stalled resolver must fail")
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeDNS)); got != 2 {
+		t.Errorf("dns outcomes = %v, want 2", got)
+	}
+}
+
+// stallingResolver never answers; it returns the context's deadline as a
+// DNS timeout, the shape net.Resolver produces.
+type stallingResolver struct{}
+
+func (stallingResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	<-ctx.Done()
+	return nil, &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
 }

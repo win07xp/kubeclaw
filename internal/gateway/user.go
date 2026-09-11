@@ -553,18 +553,45 @@ type dialStageError struct {
 func (e *dialStageError) Error() string { return e.stage + ": " + e.err.Error() }
 func (e *dialStageError) Unwrap() error { return e.err }
 
-// dialAgentTLS is the delivery transport's dialer. Each TCP connect is
-// bound by AgentConnectTimeout, the documented agentDeliveryConnectTimeout,
-// and a connect that hits it is retried on a fresh connection while the
-// attempt has budget, so a dropped SYN costs one bound rather than the
-// whole attempt. The handshake runs under the attempt's context, which
-// deliverOnce bounds by the read timeout. Certificate and trust pool come
-// from the loader per dial.
+// absoluteDialName returns the name to resolve for a dial: the Service DNS
+// name made absolute with a trailing dot, so the resolver skips the search
+// list. Under the cluster default of ndots:5, a four-label Service name is
+// otherwise tried against every search domain first, three misses per
+// resolution. IP literals and names already absolute pass through.
+func absoluteDialName(host string) string {
+	if host == "" || net.ParseIP(host) != nil || strings.HasSuffix(host, ".") {
+		return host
+	}
+	return host + "."
+}
+
+func (s *Server) agentResolver() ipResolver {
+	if s.AgentResolver != nil {
+		return s.AgentResolver
+	}
+	return net.DefaultResolver
+}
+
+// isNetTimeout reports whether err is a timeout at the network layer,
+// resolution included.
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// dialAgentTLS is the delivery transport's dialer. The Service name is
+// resolved once per attempt, by its absolute name; each TCP connect to the
+// resolved address is bound by AgentConnectTimeout, the documented
+// agentDeliveryConnectTimeout, and a lookup or connect that hits its bound
+// is tried again while the attempt has budget, so a dropped packet costs
+// one bound rather than the whole attempt. The handshake runs under the
+// attempt's deadline, which deliverOnce sets from the read timeout.
+// Certificate and trust pool come from the loader per dial.
 func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
+		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			host = addr
+			host, port = addr, ""
 		}
 		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}
 		if s.Config.InsecureSkipAgentVerify {
@@ -582,12 +609,38 @@ func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Conte
 			cfg.Certificates = []tls.Certificate{*cert}
 			cfg.RootCAs = pool
 		}
-		dialer := &net.Dialer{Timeout: s.Config.AgentConnectTimeout}
+		bound := s.Config.AgentConnectTimeout
 		deadline, bounded := attemptDeadline(ctx)
+		// budgetLeft reports whether another bounded try fits in the attempt.
+		budgetLeft := func() bool {
+			return ctx.Err() == nil && (!bounded || time.Until(deadline) > bound)
+		}
+
+		// Resolve once per attempt; a lookup that times out is retried while
+		// the attempt has budget, and any other failure ends the attempt.
+		var ip net.IP
+		for {
+			lookupCtx, cancel := context.WithTimeout(ctx, bound)
+			addrs, err := s.agentResolver().LookupIPAddr(lookupCtx, absoluteDialName(host))
+			cancel()
+			if err == nil && len(addrs) > 0 {
+				ip = addrs[0].IP
+				break
+			}
+			if err == nil {
+				err = &net.DNSError{Err: "no addresses", Name: host, IsNotFound: true}
+			}
+			if !isNetTimeout(err) || !budgetLeft() {
+				return nil, fmt.Errorf("resolve %s: %w", host, err)
+			}
+		}
+
+		dialer := &net.Dialer{Timeout: bound}
+		target := net.JoinHostPort(ip.String(), port)
 		var raw net.Conn
 		for {
 			var err error
-			raw, err = dialer.DialContext(ctx, network, addr)
+			raw, err = dialer.DialContext(ctx, network, target)
 			if err == nil {
 				break
 			}
@@ -596,9 +649,7 @@ func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Conte
 			// bound, and the new source port takes a new path through the
 			// data plane. Anything else, and an attempt out of time, fails
 			// the attempt.
-			var netErr net.Error
-			if !errors.As(err, &netErr) || !netErr.Timeout() || ctx.Err() != nil ||
-				(bounded && time.Until(deadline) <= dialer.Timeout) {
+			if !isNetTimeout(err) || !budgetLeft() {
 				return nil, &dialStageError{stage: dialStageConnect, err: err}
 			}
 		}
