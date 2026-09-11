@@ -41,6 +41,23 @@ type KubeStore struct {
 	APIReader client.Reader
 	// OperatorNamespace hosts the provider credential Secrets.
 	OperatorNamespace string
+	// Secrets serves every Secret read from per-object watches. Nil reads
+	// Secrets through Reader instead, which in production is the uncached
+	// path: the cache is disabled for Secrets (cmd/gateway), so each read is
+	// a live GET behind the client's rate limiter (#170).
+	Secrets *SecretWatcher
+}
+
+// secret reads one Secret, through the watcher when there is one.
+func (k *KubeStore) secret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+	if k.Secrets != nil {
+		return k.Secrets.Get(ctx, namespace, name)
+	}
+	var sec corev1.Secret
+	if err := k.Reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sec); err != nil {
+		return nil, err
+	}
+	return &sec, nil
 }
 
 // AgentByName looks up an Agent in the cache.
@@ -96,30 +113,29 @@ func (k *KubeStore) ToolCredential(ctx context.Context, provider *kaalmv1beta1.T
 	if ref == nil {
 		return "", nil
 	}
-	var sec corev1.Secret
-	key := types.NamespacedName{Namespace: k.OperatorNamespace, Name: ref.Name}
-	if err := k.Reader.Get(ctx, key, &sec); err != nil {
+	sec, err := k.secret(ctx, k.OperatorNamespace, ref.Name)
+	if err != nil {
 		return "", err
 	}
 	val, ok := sec.Data[ref.Key]
 	if !ok || len(val) == 0 {
-		return "", fmt.Errorf("key %q missing in Secret %s", ref.Key, key)
+		return "", fmt.Errorf("key %q missing in Secret %s/%s", ref.Key, k.OperatorNamespace, ref.Name)
 	}
 	return string(val), nil
 }
 
 // Credential reads the provider's credential Secret key from the operator
-// namespace via the cache (which doubles as the rotation watch: an updated
-// Secret is re-read on the next request).
+// namespace. With a SecretWatcher the read is served from the Secret's own
+// watch, so a rotation is visible on the next request without a GET.
 func (k *KubeStore) Credential(ctx context.Context, provider *kaalmv1beta1.ModelProvider) (string, error) {
-	var sec corev1.Secret
-	key := types.NamespacedName{Namespace: k.OperatorNamespace, Name: provider.Spec.CredentialsRef.Name}
-	if err := k.Reader.Get(ctx, key, &sec); err != nil {
+	ref := provider.Spec.CredentialsRef
+	sec, err := k.secret(ctx, k.OperatorNamespace, ref.Name)
+	if err != nil {
 		return "", err
 	}
-	val, ok := sec.Data[provider.Spec.CredentialsRef.Key]
+	val, ok := sec.Data[ref.Key]
 	if !ok || len(val) == 0 {
-		return "", fmt.Errorf("key %q missing in Secret %s", provider.Spec.CredentialsRef.Key, key)
+		return "", fmt.Errorf("key %q missing in Secret %s/%s", ref.Key, k.OperatorNamespace, ref.Name)
 	}
 	return string(val), nil
 }
@@ -157,8 +173,8 @@ func channelPathAllowed(ch *kaalmv1beta1.AgentChannel) bool {
 
 // SecretValue reads one Secret key from a user namespace.
 func (k *KubeStore) SecretValue(ctx context.Context, namespace, name, key string) (string, error) {
-	var sec corev1.Secret
-	if err := k.Reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sec); err != nil {
+	sec, err := k.secret(ctx, namespace, name)
+	if err != nil {
 		return "", err
 	}
 	val, ok := sec.Data[key]
