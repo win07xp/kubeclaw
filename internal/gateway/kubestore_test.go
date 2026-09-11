@@ -234,6 +234,29 @@ func TestKubeStore_PodByIP(t *testing.T) {
 	if _, ok := k.PodByIP(ctx, "10.0.0.250"); ok {
 		t.Error("unknown IP must miss")
 	}
+
+	// The cached lookup asks for the cache's own object rather than a deep
+	// copy: one copy per request was a quarter of the gateway's allocations.
+	rec := &recordingReader{Reader: k.Reader}
+	k.Reader = rec
+	if _, ok := k.PodByIP(ctx, "10.0.0.5"); !ok {
+		t.Fatal("hit through the recording reader failed")
+	}
+	if rec.last.UnsafeDisableDeepCopy == nil || !*rec.last.UnsafeDisableDeepCopy {
+		t.Error("PodByIP must list with UnsafeDisableDeepCopy")
+	}
+}
+
+// recordingReader captures the options of the last List it forwarded.
+type recordingReader struct {
+	client.Reader
+	last client.ListOptions
+}
+
+func (r *recordingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	r.last = client.ListOptions{}
+	r.last.ApplyOptions(opts)
+	return r.Reader.List(ctx, list, opts...)
 }
 
 func TestKubeStore_PodByIPLive(t *testing.T) {

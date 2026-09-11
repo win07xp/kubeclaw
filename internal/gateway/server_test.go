@@ -709,3 +709,18 @@ func TestCertLoader_PartialWriteFallback(t *testing.T) {
 		t.Errorf("corrupt CA must fall back to cached pool: err=%v", err)
 	}
 }
+
+func TestUpstreamTransportPoolsConnectionsPerHost(t *testing.T) {
+	s := &Server{Config: Config{UpstreamTimeout: time.Second}}
+	tr, ok := s.upstream().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("upstream transport is %T, want *http.Transport", s.upstream().Transport)
+	}
+	if tr.MaxIdleConnsPerHost != upstreamMaxIdleConnsPerHost || tr.MaxIdleConns != upstreamMaxIdleConns {
+		t.Errorf("idle pool = %d per host / %d total, want %d / %d",
+			tr.MaxIdleConnsPerHost, tr.MaxIdleConns, upstreamMaxIdleConnsPerHost, upstreamMaxIdleConns)
+	}
+	if tr.MaxIdleConnsPerHost <= http.DefaultMaxIdleConnsPerHost {
+		t.Errorf("per-host pool %d is no larger than the default %d", tr.MaxIdleConnsPerHost, http.DefaultMaxIdleConnsPerHost)
+	}
+}

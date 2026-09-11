@@ -41,8 +41,8 @@ type Store interface {
 	// ToolCredential resolves the tool provider's credential Secret key
 	// value. A nil credentialsRef (an unauthenticated server) yields "".
 	ToolCredential(ctx context.Context, provider *kaalmv1beta1.ToolProvider) (string, error)
-	// PodByIP resolves a source IP to a Pod for the cross-check and the
-	// Mode 2 ownership precheck. ok is false when no Pod matches.
+	// PodByIP resolves a source IP to a live Pod. The Pod is read-only: an
+	// implementation may hand back an object shared with its cache.
 	PodByIP(ctx context.Context, ip string) (*corev1.Pod, bool)
 	// PodByIPLive resolves a source IP to a Pod with a live apiserver List,
 	// narrowed to one namespace. It is the report-path fallback for the

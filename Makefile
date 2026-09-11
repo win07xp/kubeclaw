@@ -390,6 +390,12 @@ load-deploy: chart-sync ## Install the chart onto the load cluster with the mock
 		--set controller.pprofPort=$(LOAD_PPROF_PORT) \
 		--set gateway.pprofPort=$(LOAD_PPROF_PORT) \
 		--wait --timeout 5m
+	# The image tags are fixed, so an upgrade with no template change would
+	# leave the Pods on whatever image they started with. Restart both so a
+	# run always measures the images just imported.
+	kubectl --context k3d-$(LOAD_CLUSTER) -n kaalm-system rollout restart deploy/kaalm-controller deploy/kaalm-gateway
+	kubectl --context k3d-$(LOAD_CLUSTER) -n kaalm-system rollout status deploy/kaalm-controller --timeout=3m
+	kubectl --context k3d-$(LOAD_CLUSTER) -n kaalm-system rollout status deploy/kaalm-gateway --timeout=3m
 
 .PHONY: load-run
 load-run: ## Run the harness against an existing load cluster (the inner loop); results land in test/load/results/.

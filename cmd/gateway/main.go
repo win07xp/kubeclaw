@@ -153,6 +153,10 @@ func main() {
 		o.Client.Cache = &client.CacheOptions{
 			DisableFor: []client.Object{&corev1.Secret{}},
 		}
+		// Nothing in the gateway reads managedFields, and on a Pod they
+		// are the largest single field; dropping them at the informer
+		// shrinks every cached object and every copy made of one.
+		o.Cache.DefaultTransform = cache.TransformStripManagedFields()
 		// The ConfigMap informer (budget watch-fold) must be scoped to the
 		// operator namespace: the gateway's Role grants list/watch there
 		// only, and an unscoped informer would issue a forbidden
@@ -249,7 +253,11 @@ func main() {
 		CallbackBackoff:          mustParseBackoff(callbackBackoff, "callback-backoff", logger),
 		DiscordAPIBaseURL:        discordAPIBaseURL,
 		WhatsAppAPIBaseURL:       whatsAppAPIBaseURL,
-		Replicas: func() int {
+		// The count feeds the rate limiter's per-replica share and the
+		// hard budget's boundary margin on every request; a listing per
+		// request was measurable under load (#174), and a count a few
+		// seconds stale is within the margin those two already carry.
+		Replicas: gateway.CachedCount(5*time.Second, func() int {
 			var pods corev1.PodList
 			if err := cl.GetClient().List(context.Background(), &pods,
 				client.InNamespace(operatorNamespace),
@@ -257,7 +265,7 @@ func main() {
 				return 1
 			}
 			return len(pods.Items)
-		},
+		}),
 	}, store, tokens, gateway.NewMemorySpend())
 	server.Async = async
 	server.Completions = &gateway.KubeCompletionWriter{Client: clientset}

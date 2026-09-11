@@ -210,7 +210,7 @@ Rate limits are enforced at the gateway using token-bucket limiters keyed on (na
 
 ### Dividing by live replica count
 
-Each gateway replica divides the configured limit by the number of active gateway replicas (discovered from its Pod informer: count Pods matching the gateway label selector). When replicas scale up or down, each replica adjusts its local token bucket capacity on the next refill cycle. This means the configured value directly represents the intended cluster-wide rate limit regardless of replica count.
+Each gateway replica divides the configured limit by the number of active gateway replicas (discovered from its Pod informer: count Pods matching the gateway label selector, refreshed at most every few seconds rather than on every request). When replicas scale up or down, each replica adjusts its local token bucket capacity within that refresh and the next refill cycle. This means the configured value directly represents the intended cluster-wide rate limit regardless of replica count.
 
 **Note:** because each replica enforces its share independently, the effective cluster-wide limit is approximate. Transient bursts may slightly exceed the configured ceiling. The approximation is bounded by `configured_limit / number_of_replicas` per replica (one replica's full bucket) and is acceptable for v1.
 
