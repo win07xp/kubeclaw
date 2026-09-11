@@ -38,24 +38,25 @@ const (
 // in logs and Events to keep cardinality bounded at 1000+ agents. A nil
 // *Metrics no-ops every method, so tests need no registry.
 type Metrics struct {
-	llmRequests    *prometheus.CounterVec
-	llmDuration    *prometheus.HistogramVec
-	llmTokens      *prometheus.CounterVec
-	llmSpend       *prometheus.CounterVec
-	llmFallback    *prometheus.CounterVec
-	budgetThreshld *prometheus.CounterVec
-	budgetBoundary *prometheus.CounterVec
-	llmServerTools *prometheus.CounterVec
-	toolCalls      *prometheus.CounterVec
-	toolDuration   *prometheus.HistogramVec
-	channelMsgs    *prometheus.CounterVec
-	channelMsgDur  *prometheus.HistogramVec
-	channelWake    *prometheus.CounterVec
-	channelWakeDur *prometheus.HistogramVec
-	channelCB      *prometheus.CounterVec
-	channelCBDur   *prometheus.HistogramVec
-	tooLarge       *prometheus.CounterVec
-	patchFailed    *prometheus.CounterVec
+	llmRequests     *prometheus.CounterVec
+	llmDuration     *prometheus.HistogramVec
+	llmTokens       *prometheus.CounterVec
+	llmSpend        *prometheus.CounterVec
+	llmFallback     *prometheus.CounterVec
+	budgetThreshld  *prometheus.CounterVec
+	budgetBoundary  *prometheus.CounterVec
+	llmServerTools  *prometheus.CounterVec
+	toolCalls       *prometheus.CounterVec
+	toolDuration    *prometheus.HistogramVec
+	channelMsgs     *prometheus.CounterVec
+	channelMsgDur   *prometheus.HistogramVec
+	channelWake     *prometheus.CounterVec
+	channelWakeDur  *prometheus.HistogramVec
+	channelCB       *prometheus.CounterVec
+	channelDelivery *prometheus.CounterVec
+	channelCBDur    *prometheus.HistogramVec
+	tooLarge        *prometheus.CounterVec
+	patchFailed     *prometheus.CounterVec
 }
 
 // NewMetrics registers the gateway catalog with the given registerer.
@@ -107,6 +108,9 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		channelCB: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "kaalm_channel_callback_total", Help: "Async callback attempts by outcome.",
 		}, []string{labelNamespace, labelStatus}),
+		channelDelivery: f.NewCounterVec(prometheus.CounterOpts{
+			Name: "kaalm_channel_delivery_attempts_total", Help: "Agent delivery attempts by outcome.",
+		}, []string{labelNamespace, "outcome"}),
 		channelCBDur: f.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "kaalm_channel_callback_duration_seconds", Help: "Async callback delivery effort duration.",
 		}, []string{labelNamespace}),
@@ -237,6 +241,15 @@ func (m *Metrics) ChannelWakeDuration(namespace, result string, seconds float64)
 		return
 	}
 	m.channelWakeDur.WithLabelValues(namespace, result).Observe(seconds)
+}
+
+// ChannelDeliveryAttempt counts one POST /v1/message attempt by outcome:
+// "ok" or the failure class from deliveryOutcome.
+func (m *Metrics) ChannelDeliveryAttempt(namespace, outcome string) {
+	if m == nil {
+		return
+	}
+	m.channelDelivery.WithLabelValues(namespace, outcome).Inc()
 }
 
 // ChannelCallback counts one callback delivery effort by outcome.

@@ -17,6 +17,14 @@ limitations under the License.
 package gateway
 
 import (
+	"crypto/x509"
+	"errors"
+	"net"
+	"net/url"
+	"os"
+	"sync/atomic"
+	"syscall"
+
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -24,6 +32,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -645,5 +655,87 @@ func TestWebhook_DeliveryRecordsActivity(t *testing.T) {
 	_ = resp.Body.Close()
 	if _, ok := h2.server.Activity.Snapshot("team-a").Agents["sup"]; ok {
 		t.Error("a failed delivery must not count as activity")
+	}
+}
+
+func TestDeliveryOutcomeClassifiesTheFailingLayer(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"dns", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: &net.DNSError{Name: "a.b.svc", IsTimeout: true}}}, deliveryOutcomeDNS},
+		{"deadline", fmt.Errorf("Post: %w", context.DeadlineExceeded), deliveryOutcomeTimeout},
+		{"canceled", fmt.Errorf("Post: %w", context.Canceled), deliveryOutcomeCanceled},
+		{"io timeout", errors.New("read tcp 10.0.0.1:1->10.0.0.2:8443: i/o timeout"), deliveryOutcomeTimeout},
+		{"refused", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}}, deliveryOutcomeConnect},
+		{"reset", errors.New("read: connection reset by peer"), deliveryOutcomeConnect},
+		{"tls", &url.Error{Op: "Post", Err: x509.UnknownAuthorityError{}}, deliveryOutcomeTLS},
+		{"status", errors.New("agent returned 503"), deliveryOutcomeStatus},
+		{"malformed", errors.New("agent returned 200 with a malformed response envelope"), deliveryOutcomeMalformed},
+		{"too large", errors.New("agent response body exceeded 921600 bytes; externalize large outputs and reference by URL"), deliveryOutcomeTooLarge},
+		{"other", errors.New("boom"), deliveryOutcomeOther},
+	}
+	for _, c := range cases {
+		if got := deliveryOutcome(c.err); got != c.want {
+			t.Errorf("%s: deliveryOutcome(%v) = %q, want %q", c.name, c.err, got, c.want)
+		}
+	}
+}
+
+// deliveryServer returns a Server whose agent deliveries land on fn, with a
+// fast retry schedule and a registry of its own for the attempt counter.
+func deliveryServer(t *testing.T, fn http.HandlerFunc) *Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(fn)
+	t.Cleanup(srv.Close)
+	host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "https://"), ":")
+	port, _ := strconv.Atoi(portStr)
+	s := NewServer(Config{
+		OperatorNamespace:        "kaalm-system",
+		DeliveryBackoff:          []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
+		AgentServiceHostOverride: host,
+		AgentServicePortOverride: int32(port),
+		InsecureSkipAgentVerify:  true,
+		AgentReadTimeout:         2 * time.Second,
+		MaxResponseBodyBytes:     1 << 20,
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+	return s
+}
+
+func TestDeliverToAgentCountsEveryAttemptByOutcome(t *testing.T) {
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	env := MessageEnvelope{MessageID: "m1"}
+
+	// Every attempt answers 503: four attempts, all "status", none "ok".
+	s := deliveryServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	if _, err := s.deliverToAgent(context.Background(), agent, env); err == nil {
+		t.Fatal("delivery against a 503 agent must fail")
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeStatus)); got != 4 {
+		t.Errorf("status attempts = %v, want 4", got)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeOK)); got != 0 {
+		t.Errorf("ok attempts = %v, want 0", got)
+	}
+
+	// One 503 then success: one "status", one "ok".
+	var calls int32
+	s = deliveryServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"content":"hi"}`))
+	})
+	if _, err := s.deliverToAgent(context.Background(), agent, env); err != nil {
+		t.Fatalf("delivery must succeed on the second attempt: %v", err)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeStatus)); got != 1 {
+		t.Errorf("status attempts = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeOK)); got != 1 {
+		t.Errorf("ok attempts = %v, want 1", got)
 	}
 }

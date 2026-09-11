@@ -74,6 +74,7 @@ The Kaalm-specific metrics across all three components:
 | User Gateway | `kaalm_channel_message_duration_seconds` | histogram | `channel_type` |
 | User Gateway | `kaalm_channel_wake_total` | counter | `namespace` |
 | User Gateway | `kaalm_channel_wake_duration_seconds` | histogram | `namespace`, `result` |
+| User Gateway | `kaalm_channel_delivery_attempts_total` | counter | `namespace`, `outcome` |
 | User Gateway | `kaalm_channel_callback_total` | counter | `namespace`, `status` |
 | User Gateway | `kaalm_channel_callback_duration_seconds` | histogram | `namespace` |
 | User Gateway | `kaalm_channel_response_too_large_total` | counter | `namespace`, `mode` |

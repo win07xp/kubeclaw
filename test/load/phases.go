@@ -91,6 +91,7 @@ type holdResult struct {
 	Client            *loadResult        `json:"client"`
 	MessagesByStatus  map[string]float64 `json:"messagesByStatus"`
 	MessageDurationMs stats              `json:"messageDurationMs"`
+	DeliveryAttempts  map[string]float64 `json:"deliveryAttempts"`
 	Callbacks         float64            `json:"callbacks"`
 	ReadyBefore       int                `json:"readyBefore"`
 	ReadyAfter        int                `json:"readyAfter"`
@@ -556,6 +557,7 @@ func (h *harness) runHold(ctx context.Context) error {
 	webhook := map[string]string{"channel_type": channelTypeWebhook}
 	res.MessagesByStatus = counterByLabel(before, after, "kaalm_channel_messages_total", "status", webhook)
 	res.MessageDurationMs = histStats(histogramDelta(before, after, "kaalm_channel_message_duration_seconds", webhook))
+	res.DeliveryAttempts = counterByLabel(before, after, "kaalm_channel_delivery_attempts_total", "outcome", nil)
 	res.Callbacks = counterDelta(before, after, "kaalm_channel_callback_total", nil)
 	res.GatewayUsageMax = peak["kaalm-gateway"]
 	res.ControllerUsage = peak["kaalm-controller"]
@@ -571,6 +573,7 @@ func (h *harness) runHold(ctx context.Context) error {
 			res.Flaps++
 		}
 	}
+	h.logf("  delivery attempts by outcome %v", res.DeliveryAttempts)
 	h.logf("  %d messages accepted, statuses %v, callbacks %.0f, Ready %d -> %d, restarts %d -> %d, flaps %d",
 		client.Requests, res.MessagesByStatus, res.Callbacks, res.ReadyBefore, res.ReadyAfter,
 		res.RestartsBefore, res.RestartsAfter, res.Flaps)

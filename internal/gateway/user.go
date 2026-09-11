@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -366,15 +367,68 @@ func (s *Server) deliverToAgent(
 		}
 		respBody, err := s.deliverOnce(ctx, url, agent, payload)
 		if err == nil {
+			s.Metrics.ChannelDeliveryAttempt(agent.Namespace, deliveryOutcomeOK)
 			return respBody, nil
 		}
 		lastErr = err
-		if strings.Contains(err.Error(), "response body exceeded") {
+		outcome := deliveryOutcome(err)
+		s.Metrics.ChannelDeliveryAttempt(agent.Namespace, outcome)
+		slog.Warn("agent delivery attempt failed",
+			"namespace", agent.Namespace, "agent", agent.Name, "messageId", env.MessageID,
+			"attempt", attempt+1, "of", len(backoff), "outcome", outcome, "error", err.Error())
+		if outcome == deliveryOutcomeTooLarge {
 			return nil, err // size violations are not retried
 		}
-		_ = attempt
 	}
 	return nil, fmt.Errorf("failed to deliver message to agent after %d attempts: %w", len(backoff), lastErr)
+}
+
+// Delivery attempt outcomes, the "outcome" label of
+// kaalm_channel_delivery_attempts_total. The failure classes name the layer
+// that failed so a retry rate can be read back to a cause (#172).
+const (
+	deliveryOutcomeOK        = "ok"
+	deliveryOutcomeDNS       = "dns"       // name resolution failed or timed out
+	deliveryOutcomeConnect   = "connect"   // TCP connect refused, reset, or unreachable
+	deliveryOutcomeTLS       = "tls"       // handshake or certificate verification
+	deliveryOutcomeTimeout   = "timeout"   // the per-attempt deadline elapsed
+	deliveryOutcomeStatus    = "status"    // the agent answered outside 2xx
+	deliveryOutcomeMalformed = "malformed" // 2xx with an unusable envelope
+	deliveryOutcomeTooLarge  = "too_large" // reply over the body cap; not retried
+	deliveryOutcomeCanceled  = "canceled"  // the delivery's own context ended
+	deliveryOutcomeOther     = "other"
+)
+
+// deliveryOutcome classifies one failed attempt. Go's net errors are
+// nested (url.Error over net.OpError over the syscall or DNS error), so the
+// classes are read from the chain first and from the message last.
+func deliveryOutcome(err error) string {
+	var dnsErr *net.DNSError
+	switch {
+	case errors.As(err, &dnsErr):
+		return deliveryOutcomeDNS
+	case errors.Is(err, context.Canceled):
+		return deliveryOutcomeCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return deliveryOutcomeTimeout
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "response body exceeded"):
+		return deliveryOutcomeTooLarge
+	case strings.Contains(msg, "malformed response envelope"):
+		return deliveryOutcomeMalformed
+	case strings.HasPrefix(msg, "agent returned "):
+		return deliveryOutcomeStatus
+	case strings.Contains(msg, "tls:") || strings.Contains(msg, "x509:"):
+		return deliveryOutcomeTLS
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "no route to host") || strings.Contains(msg, "network is unreachable"):
+		return deliveryOutcomeConnect
+	case strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "Client.Timeout"):
+		return deliveryOutcomeTimeout
+	}
+	return deliveryOutcomeOther
 }
 
 func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta1.Agent, payload []byte) ([]byte, error) {
