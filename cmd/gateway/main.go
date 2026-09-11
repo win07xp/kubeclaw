@@ -129,11 +129,20 @@ func main() {
 	utilruntime.Must(cmapi.AddToScheme(scheme))
 
 	restCfg := ctrl.GetConfigOrDie()
-	// Secrets are read uncached (direct GET), never through an informer. The
-	// gateway holds only get/watch on Secrets in kaalm-system plus dynamic
-	// resourceNames-scoped grants on individual channel Secrets (no cluster-wide
-	// list), so a cached Secret informer would issue a forbidden cluster-scoped
-	// LIST and the read would hang waiting for a sync that never lands. See
+	// The controller-runtime defaults (20 QPS, burst 30) size a reconciler's
+	// client, not a proxy's. The gateway's live reads (task-completion
+	// cross-checks, first-use Secret loads) must never queue behind a bucket
+	// that small: at 20 QPS a per-request GET capped every replica at 20
+	// requests per second (#170).
+	restCfg.QPS = 100
+	restCfg.Burst = 200
+	// Secrets are never read through the shared informer cache. The gateway
+	// holds only get/watch on Secrets in kaalm-system plus dynamic
+	// resourceNames-scoped grants on individual channel Secrets (no
+	// cluster-wide list), so a cached Secret informer would issue a forbidden
+	// cluster-scoped LIST and the read would hang waiting for a sync that
+	// never lands. Secret reads go through gateway.SecretWatcher instead: one
+	// GET-backed, name-filtered watch per referenced Secret. See
 	// docs/src/security/rbac.md (gateway Secret access).
 	cl, err := cluster.New(restCfg, func(o *cluster.Options) {
 		o.Scheme = scheme
@@ -269,6 +278,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	store.Secrets = gateway.NewSecretWatcher(ctx, clientset)
 
 	go func() {
 		if err := cl.Start(ctx); err != nil {

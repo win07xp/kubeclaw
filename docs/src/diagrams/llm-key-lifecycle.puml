@@ -38,7 +38,7 @@ end note
 
 == 3. Loaded ==
 
-GW -> SEC : get + watch, at startup
+GW -> SEC : get + watch, on first use
 SEC -> GW : key material
 note over GW #90EE90
   Held in **process memory** for the
