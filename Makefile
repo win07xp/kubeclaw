@@ -343,6 +343,61 @@ e2e: ## One-shot k3d e2e: recreate the cluster, build+import images, install the
 	# cache knows nothing about, and a replayed transcript is not a gate.
 	go test ./test/e2e/... -tags e2e -v -timeout 20m -count=1
 
+##@ Load test (#140, the scale proof)
+
+# The load harness runs on its own cluster, never the shared e2e one: it needs
+# more nodes and a raised kubelet max-pods, and a ramp to several hundred
+# agents is not something to do next to a functional suite. The numbers it
+# produces publish in docs/src/operations/load-and-scale.md; the run is a
+# per-release local gate, not CI (see that page for why).
+LOAD_CLUSTER ?= kaalm-load
+LOAD_AGENT_NODES ?= 2
+LOAD_MAX_PODS ?= 250
+LOADGEN_IMG ?= registry.test/load/loadgen:load
+# Extra flags for `load run` (see test/load/config.go), for example
+# LOAD_FLAGS='-ramp-target 300 -phases gateway,ramp'.
+LOAD_FLAGS ?=
+
+.PHONY: load-up
+load-up: ## Create the load cluster: 1 server + $(LOAD_AGENT_NODES) agents, max-pods $(LOAD_MAX_PODS), cert-manager, trust-manager.
+	CLUSTER=$(LOAD_CLUSTER) K3D_AGENTS=$(LOAD_AGENT_NODES) K3D_MAX_PODS=$(LOAD_MAX_PODS) hack/k3d-up.sh
+
+.PHONY: load-down
+load-down: ## Delete the load cluster.
+	k3d cluster delete $(LOAD_CLUSTER)
+
+.PHONY: load-images
+load-images: ## Build and import what the load run needs: controller, gateway, mock provider, the Go agent, and the load generator.
+	docker build -t $(CONTROLLER_IMG) --build-arg BINARY=manager .
+	docker build -t $(GATEWAY_IMG) --build-arg BINARY=gateway .
+	docker build -t $(MOCKPROVIDER_IMG) -f test/e2e/mockprovider/Dockerfile .
+	docker build -t $(GO_AGENT_IMG) -f images/agent-go/Dockerfile .
+	docker build -t $(AGENT_IMG) -f test/e2e/starter-go/Dockerfile --build-arg BASE=$(GO_AGENT_IMG) .
+	docker build -t $(LOADGEN_IMG) -f test/load/Dockerfile .
+	CLUSTER=$(LOAD_CLUSTER) hack/k3d-import.sh $(CONTROLLER_IMG) $(GATEWAY_IMG) $(MOCKPROVIDER_IMG) $(AGENT_IMG) $(LOADGEN_IMG)
+
+.PHONY: load-deploy
+load-deploy: chart-sync ## Install the chart onto the load cluster with the mock provider trusted for upstream and callbacks.
+	helm --kube-context k3d-$(LOAD_CLUSTER) upgrade --install kaalm charts/kaalm -n kaalm-system --create-namespace \
+		--set certManager.clusterResourceNamespace=cert-manager \
+		--set gateway.trustClusterCAForUpstream=true \
+		--set gateway.trustClusterCAForCallbacks=true \
+		--set 'gateway.callbackUrl.allowlist={mock-provider.load.svc}' \
+		--set controller.trustClusterCAForProbes=true \
+		--wait --timeout 5m
+
+.PHONY: load-run
+load-run: ## Run the harness against an existing load cluster (the inner loop); results land in test/load/results/.
+	go run -tags loadtest ./test/load run -context k3d-$(LOAD_CLUSTER) -loadgen-image $(LOADGEN_IMG) $(LOAD_FLAGS)
+
+.PHONY: load
+load: ## One-shot scale proof: fresh load cluster, images, chart, the full run.
+	-k3d cluster delete $(LOAD_CLUSTER)
+	$(MAKE) load-up
+	$(MAKE) load-images
+	$(MAKE) load-deploy
+	$(MAKE) load-run
+
 ##@ Dependencies
 
 ## Location to install dependencies to

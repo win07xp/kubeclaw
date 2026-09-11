@@ -1,0 +1,195 @@
+# In-cluster infrastructure for the load harness (test/load), applied once per
+# run before any phase. Everything the fleet needs that is not itself under
+# measurement: the namespace, the mock LLM provider it forwards to, the three
+# ModelProviders the gateway legs target, the channel secrets, and the load
+# generator's ServiceAccount.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: load
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadgen
+  namespace: load
+---
+# The channels' inbound bearer; the gateway reads it through the scoped grant
+# the AgentChannel reconciler creates.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: load-hook
+  namespace: load
+type: Opaque
+stringData:
+  token: load-webhook-bearer-token
+---
+# The callback signing key for async replies pushed to the mock's receiver.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: load-callback-hmac
+  namespace: load
+type: Opaque
+stringData:
+  key: load-callback-hmac-key
+---
+# The mock provider, the same test double the e2e suite uses, in the load
+# namespace so its Service name matches the gateway's callback allowlist
+# (make load-deploy sets gateway.callbackUrl.allowlist={mock-provider.load.svc}).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mock-provider-tls
+  namespace: load
+spec:
+  secretName: mock-provider-tls
+  issuerRef:
+    name: kaalm-ca-issuer
+    kind: ClusterIssuer
+  usages:
+    - server auth
+  dnsNames:
+    - mock-provider.load.svc
+    - mock-provider.load.svc.cluster.local
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-provider
+  namespace: load
+  labels:
+    app: mock-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-provider
+  template:
+    metadata:
+      labels:
+        app: mock-provider
+    spec:
+      containers:
+        - name: mock-provider
+          image: registry.test/mock/llm-provider:e2e
+          imagePullPolicy: IfNotPresent
+          args:
+            - --addr=:8443
+            - --tls-cert=/var/run/tls/tls.crt
+            - --tls-key=/var/run/tls/tls.key
+          ports:
+            - containerPort: 8443
+          volumeMounts:
+            - name: tls
+              mountPath: /var/run/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: mock-provider-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-provider
+  namespace: load
+spec:
+  selector:
+    app: mock-provider
+  ports:
+    - port: 8443
+      targetPort: 8443
+---
+# The providers' credential, resolved in the operator namespace.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: load-mock-key
+  namespace: kaalm-system
+type: Opaque
+stringData:
+  token: dummy-mock-credential
+---
+# Three providers on one mock, told apart by endpoint prefix so the mock's
+# per-prefix counters and the gateway's per-provider histograms separate the
+# legs. Health probes are off: the mock's liveness is not under measurement.
+#
+# load-fast: soft budget, the mock answers immediately. The gateway's own
+# per-request cost is what this leg's histogram shows.
+apiVersion: kaalm.io/v1beta1
+kind: ModelProvider
+metadata:
+  name: load-fast
+spec:
+  type: openai-compatible
+  endpoint: https://mock-provider.load.svc:8443/ok/fast
+  credentialsRef:
+    name: load-mock-key
+    key: token
+  healthCheck:
+    enabled: false
+  allowedNamespaces:
+    - load
+  budget:
+    period: daily
+    perNamespaceUSD: "1000000"
+  models:
+    - id: mock-model
+      costPer1MInputTokens: "1.00"
+      costPer1MOutputTokens: "2.00"
+---
+# load-slow: soft budget, the mock answers after 50 ms, so the leg reflects
+# realistic concurrency against a provider that takes time.
+apiVersion: kaalm.io/v1beta1
+kind: ModelProvider
+metadata:
+  name: load-slow
+spec:
+  type: openai-compatible
+  endpoint: https://mock-provider.load.svc:8443/slow50/slow
+  credentialsRef:
+    name: load-mock-key
+    key: token
+  healthCheck:
+    enabled: false
+  allowedNamespaces:
+    - load
+  budget:
+    period: daily
+    perNamespaceUSD: "1000000"
+  models:
+    - id: mock-model
+      costPer1MInputTokens: "1.00"
+      costPer1MOutputTokens: "2.00"
+---
+# load-hard: hard budget enforcement with a ceiling nothing reaches, so the
+# leg measures what synchronous ledger admission costs, not a block.
+apiVersion: kaalm.io/v1beta1
+kind: ModelProvider
+metadata:
+  name: load-hard
+spec:
+  type: openai-compatible
+  endpoint: https://mock-provider.load.svc:8443/ok/hard
+  credentialsRef:
+    name: load-mock-key
+    key: token
+  healthCheck:
+    enabled: false
+  allowedNamespaces:
+    - load
+  budget:
+    period: daily
+    perNamespaceUSD: "1000000"
+    enforcement: hard
+    hard:
+      boundaryMarginPercent: 5
+    policies:
+      - atPercent: 100
+        action: block
+  models:
+    - id: mock-model
+      costPer1MInputTokens: "1.00"
+      costPer1MOutputTokens: "2.00"

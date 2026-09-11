@@ -83,6 +83,7 @@
 - [Deployment](operations/deployment.md)
 - [API Versioning and Deprecation](operations/api-versioning.md)
 - [Observability](operations/observability.md)
+- [Load and Scale](operations/load-and-scale.md)
 
 ---
 

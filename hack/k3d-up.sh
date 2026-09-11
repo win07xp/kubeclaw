@@ -16,14 +16,24 @@ CLUSTER="${CLUSTER:-kaalm-dev}"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 TRUST_MANAGER_VERSION="${TRUST_MANAGER_VERSION:-v0.13.0}"
 TRUST_NAMESPACE="${TRUST_NAMESPACE:-cert-manager}"
+# The load harness (make load) asks for a wider cluster: extra agent nodes and
+# a raised kubelet max-pods (the default 110 per node caps a fleet long before
+# memory does). Both default to the plain single-node e2e shape.
+K3D_AGENTS="${K3D_AGENTS:-0}"
+K3D_MAX_PODS="${K3D_MAX_PODS:-}"
 
 echo ">> ensuring k3d cluster '${CLUSTER}'"
 if k3d cluster list "${CLUSTER}" >/dev/null 2>&1; then
   echo "   cluster exists, reusing"
 else
-  k3d cluster create "${CLUSTER}" \
-    --wait \
-    --k3s-arg "--disable=traefik@server:0"
+  args=(--wait --agents "${K3D_AGENTS}" --k3s-arg "--disable=traefik@server:0")
+  if [ -n "${K3D_MAX_PODS}" ]; then
+    args+=(--k3s-arg "--kubelet-arg=max-pods=${K3D_MAX_PODS}@server:0")
+    if [ "${K3D_AGENTS}" -gt 0 ]; then
+      args+=(--k3s-arg "--kubelet-arg=max-pods=${K3D_MAX_PODS}@agent:*")
+    fi
+  fi
+  k3d cluster create "${CLUSTER}" "${args[@]}"
 fi
 kubectl config use-context "k3d-${CLUSTER}" >/dev/null
 
