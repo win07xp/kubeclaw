@@ -5,6 +5,8 @@ learn/book/
 
 # Packaged Helm charts and the consolidated installer.
 dist/
+# Load harness runs; the published baseline lives in test/load/baseline/.
+test/load/results/
 
 *.exe
 *.exe~

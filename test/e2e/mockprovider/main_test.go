@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBehaviorFor(t *testing.T) {
@@ -50,6 +51,29 @@ func TestBehaviorFor(t *testing.T) {
 	_, okIn, _ := behaviorFor("/ok/x")
 	if bigIn <= okIn {
 		t.Errorf("bigusage input tokens %d not greater than ok %d", bigIn, okIn)
+	}
+}
+
+func TestDelayForSlowPrefix(t *testing.T) {
+	cases := []struct {
+		path string
+		want time.Duration
+	}{
+		{"/slow50/v1/chat/completions", 50 * time.Millisecond},
+		{"/slow250/leg/v1/messages", 250 * time.Millisecond},
+		{"/slow/v1/chat/completions", 0},   // no number
+		{"/slow-5/v1/chat/completions", 0}, // not a positive integer
+		{"/ok/v1/chat/completions", 0},
+		{"/v1/chat/completions", 0},
+	}
+	for _, c := range cases {
+		if got := delayFor(c.path); got != c.want {
+			t.Errorf("delayFor(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	// A slow prefix still answers as /ok does.
+	if status, in, out := behaviorFor("/slow50/v1/chat/completions"); status != http.StatusOK || in == 0 || out == 0 {
+		t.Errorf("slow prefix behavior = (%d, %d, %d), want 200 with usage", status, in, out)
 	}
 }
 

@@ -26,6 +26,8 @@ limitations under the License.
 //	/ok        (default) -> 200 chat completion with non-zero usage
 //	/fail                -> 503 (a fallbackable status, drives fallback tests)
 //	/bigusage            -> 200 with large usage (drives budget-exhaustion tests)
+//	/slow<ms>            -> 200 after <ms> milliseconds (the load harness's
+//	                        realistic-latency provider)
 //
 // GET .../v1/models returns 200 for probe compatibility. POST /callback records
 // async-webhook deliveries; GET /introspect/callbacks returns them for
@@ -41,6 +43,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -169,9 +172,28 @@ func behaviorFor(path string) (status int, in, out int64) {
 		return http.StatusServiceUnavailable, 0, 0
 	case strings.HasPrefix(path, "/bigusage"):
 		return http.StatusOK, 5_000_000, 5_000_000
-	default: // "/ok" and anything else
+	default: // "/ok", "/slow<ms>", and anything else
 		return http.StatusOK, 11, 22
 	}
+}
+
+// delayFor reads a simulated upstream latency off a "/slow<ms>" prefix, so the
+// load harness can measure the gateway against a provider that takes realistic
+// time to answer. Any other prefix answers immediately.
+func delayFor(path string) time.Duration {
+	const prefix = "/slow"
+	if !strings.HasPrefix(path, prefix) {
+		return 0
+	}
+	digits := strings.TrimPrefix(path, prefix)
+	if i := strings.IndexByte(digits, '/'); i >= 0 {
+		digits = digits[:i]
+	}
+	ms, err := strconv.Atoi(digits)
+	if err != nil || ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // chat serves both LLM paths: /v1/chat/completions in the OpenAI shape and
@@ -194,6 +216,9 @@ func (m *mock) chat(w http.ResponseWriter, r *http.Request) {
 	stream, _ := parsed["stream"].(bool)
 	anthropic := strings.HasSuffix(r.URL.Path, "/v1/messages")
 
+	if d := delayFor(r.URL.Path); d > 0 {
+		time.Sleep(d)
+	}
 	status, in, out := behaviorFor(r.URL.Path)
 	if status != http.StatusOK {
 		if anthropic {
