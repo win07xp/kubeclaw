@@ -77,7 +77,7 @@ The Gateway-Internal API endpoints are not part of the LLM proxy or webhook flow
 
 Kubelet liveness and readiness probes for the gateway terminate on a separate **internal health port** (TLS, no client auth; `GET /healthz`, `GET /readyz`) rather than on `:8443` or `:8080`, so they sit outside the listener auth profiles above. The gateway uses a dedicated health port rather than handshake-mode coexistence on `:8443` or `:8080`, the pattern used by the controller's `:9443` (see [Control Plane](../concepts/system-architecture.md#control-plane)). The reason: both gateway listeners are reachable beyond the trust boundary that makes cert-less probe coexistence safe on the controller's purely internal `:9443`. `:8080` sits behind a user-provisioned Ingress in the full-lifecycle tier, and `:8443` is reachable by every mTLS-authenticated agent. See [Gateway Readiness](llm/operations.md#gateway-readiness).
 
-Prometheus metrics are served on a fourth, dedicated port: `:9090/metrics`, unauthenticated in-cluster and shared by the LLM Gateway and the User Gateway (single Deployment). See [Metrics](../operations/observability.md#metrics).
+Prometheus metrics are served on a fourth, dedicated port: `:9090/metrics`, unauthenticated in-cluster and shared by the LLM Gateway and the User Gateway (single Deployment). See [Metrics](../operations/observability.md#metrics). A fifth port, off by default and outside the diagram, serves Go profiles when `gateway.pprofPort` is set; see [Profiling](../operations/observability.md#profiling).
 
 ## Credentials and RBAC
 

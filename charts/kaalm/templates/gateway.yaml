@@ -63,6 +63,9 @@ spec:
             - --otlp-endpoint={{ .Values.gateway.tracing.otlpEndpoint }}
             - --otlp-sample-ratio={{ .Values.gateway.tracing.sampleRatio }}
             {{- end }}
+            {{- if .Values.gateway.pprofPort }}
+            - --pprof-addr=:{{ .Values.gateway.pprofPort }}
+            {{- end }}
             {{- $upstreamCAs := list }}
             {{- if .Values.gateway.trustClusterCAForUpstream }}
             {{- $upstreamCAs = append $upstreamCAs "/var/run/kaalm/ca.crt" }}
@@ -100,6 +103,10 @@ spec:
               containerPort: 8443
             - name: metrics
               containerPort: 9090
+            {{- if .Values.gateway.pprofPort }}
+            - name: pprof
+              containerPort: {{ .Values.gateway.pprofPort }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

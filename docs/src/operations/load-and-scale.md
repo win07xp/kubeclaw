@@ -23,7 +23,7 @@ make load-run LOAD_FLAGS='-phases gateway -gateway-duration 30s'   # inner loop 
 make load-down                  # delete the cluster
 ```
 
-`make load` takes about an hour on the baseline machine. Results land in `test/load/results/` as JSON; the published baseline lives in `test/load/baseline/`. The flags in `test/load/config.go` change the fleet size, the wave size, the phase list, and every duration. The defaults are the baseline shape, so a baseline re-run is the one-line command.
+`make load` takes about an hour on the baseline machine. Results land in `test/load/results/` as JSON; the published baseline lives in `test/load/baseline/`. The flags in `test/load/config.go` change the fleet size, the wave size, the phase list, and every duration. The defaults are the baseline shape, so a baseline re-run is the one-line command. The load deploy also opens the [profiling](observability.md#profiling) listeners on both components (`LOAD_PPROF_PORT`, default `6060`), so a profile can be taken during any phase.
 
 The harness checks two host prerequisites before it starts:
 

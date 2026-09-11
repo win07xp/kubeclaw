@@ -51,6 +51,7 @@ import (
 	kaalmv1beta1 "github.com/win07xp/kaalm/api/v1beta1"
 	"github.com/win07xp/kaalm/internal/callbackpolicy"
 	"github.com/win07xp/kaalm/internal/controller"
+	"github.com/win07xp/kaalm/internal/profiling"
 	"github.com/win07xp/kaalm/internal/storagemigration"
 	// +kubebuilder:scaffold:imports
 )
@@ -79,6 +80,7 @@ func main() {
 	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
+	var pprofAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -89,6 +91,8 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&pprofAddr, "pprof-bind-address", "",
+		"The address the net/http/pprof endpoint binds to (debug only; empty disables it).")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -212,13 +216,20 @@ func main() {
 		})
 	}
 
+	if pprofAddr != "" {
+		setupLog.Info("pprof listener enabled; debug only", "addr", pprofAddr)
+		profiling.EnableSampling()
+	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "e06da714.io",
+		// Profiling on its own port, only when asked for: unauthenticated,
+		// for a port-forward during a profiling session, never a Service.
+		PprofBindAddress: pprofAddr,
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "e06da714.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

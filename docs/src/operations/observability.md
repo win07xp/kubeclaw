@@ -197,6 +197,19 @@ The agent's own processing appears as the gap between `agent.deliver` and its ch
 
 The controller emits no spans in this version: the traced path is the message path, and reconcile visibility remains metrics, logs, and Events. Scenario [S20](../appendix/scenarios.md#s20-follow-one-message-across-the-hops) proves the connected trace live: one webhook message, one trace, its spans read back out of a Jaeger beside the e2e cluster.
 
+## Profiling
+
+Both components can serve Go's `net/http/pprof` profiles, off by default. Setting `controller.pprofPort` or `gateway.pprofPort` to a port number adds the flag (`--pprof-bind-address` on the controller, `--pprof-addr` on the gateway) and a named `pprof` container port; the listener then serves CPU, heap, goroutine, mutex, and block profiles under `/debug/pprof/`. Turning it on also enables mutex and block sampling, which Go leaves off because each costs a little on every contended lock and blocking call.
+
+The listener is a debugging aid, not an operations surface. It is unauthenticated, and the chart never puts it behind a Service, so the way to reach it is a port-forward for the length of a profiling session:
+
+```bash
+kubectl -n kaalm-system port-forward deploy/kaalm-gateway 6060:6060
+go tool pprof -http=:8000 http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+```
+
+Leave both values at `0` in production. The [load harness](load-and-scale.md) turns them on for the load cluster so a profile can be taken during any phase.
+
 ## See also
 
 - [Observability](../controller/operations.md#observability): controller metric catalog and emit-points
