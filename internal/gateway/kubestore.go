@@ -184,10 +184,15 @@ func (k *KubeStore) SecretValue(ctx context.Context, namespace, name, key string
 	return string(val), nil
 }
 
-// PodByIP resolves a source IP via the status.podIP cache index.
+// PodByIP resolves a source IP via the status.podIP cache index. The
+// returned Pod shares memory with the informer cache and is read-only:
+// the lookup runs once per authenticated request, and a deep copy of the
+// Pod per request was a quarter of the gateway's allocations under the
+// load baseline (#174).
 func (k *KubeStore) PodByIP(ctx context.Context, ip string) (*corev1.Pod, bool) {
 	var pods corev1.PodList
-	if err := k.Reader.List(ctx, &pods, client.MatchingFields{PodIPIndex: ip}); err != nil {
+	if err := k.Reader.List(ctx, &pods, client.MatchingFields{PodIPIndex: ip},
+		client.UnsafeDisableDeepCopy); err != nil {
 		return nil, false
 	}
 	return firstLivePod(&pods)

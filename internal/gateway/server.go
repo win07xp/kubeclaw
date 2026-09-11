@@ -394,10 +394,23 @@ func (s *Server) mcpUpstreamTimeout() time.Duration {
 	return s.Config.UpstreamTimeout
 }
 
+// The default transport keeps two idle connections per host. A provider is
+// one host serving every concurrent request, so with more callers than
+// that nearly every request dialed and ran a full TLS handshake: 40% of
+// gateway CPU at 32 callers under the load baseline (#174). The per-host
+// limit is sized for hundreds of in-flight requests to one provider; the
+// total bounds the pool across every provider a gateway forwards to.
+const (
+	upstreamMaxIdleConnsPerHost = 256
+	upstreamMaxIdleConns        = 1024
+)
+
 // upstream returns the shared provider-facing HTTP client.
 func (s *Server) upstream() *http.Client {
 	s.upstreamOnce.Do(func() {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConnsPerHost = upstreamMaxIdleConnsPerHost
+		transport.MaxIdleConns = upstreamMaxIdleConns
 		if len(s.Config.UpstreamCAFiles) > 0 || s.Config.UpstreamCAs != nil {
 			// Build the TLS config per dial rather than once, so a rotated
 			// bundle is picked up without a restart. Pooled connections keep
