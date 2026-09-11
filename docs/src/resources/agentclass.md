@@ -220,4 +220,4 @@ If any referenced Secret is missing from the target namespace, the Agent enters 
 
 `runtime.backend` only accepts `pod` in v1. The `agentSandbox` value (which creates Agent Sandbox `Sandbox` CRs instead of raw Pods) is deferred to v1.1.
 
-The CRD schema enforces this via `x-kubernetes-validations: [{rule: "self == 'pod'", message: "agentSandbox backend is not supported in v1; use pod"}]` on the `runtime.backend` field. Invalid values are therefore rejected at apply time rather than surfaced as a reconcile error, which gives the author immediate feedback. See [Integration Points](../concepts/system-architecture.md#integration-points) for the planned integration design.
+The CRD schema enforces this with an enum on the `runtime.backend` field (`+kubebuilder:validation:Enum=pod`). Invalid values are therefore rejected at apply time rather than surfaced as a reconcile error, which gives the author immediate feedback, and adding `agentSandbox` later is an additive enum change on the frozen v1beta1 schema. See [Integration Points](../concepts/system-architecture.md#integration-points) for the planned integration design.

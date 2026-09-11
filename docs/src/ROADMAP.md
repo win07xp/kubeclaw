@@ -71,7 +71,16 @@ The next milestone is **v1.0.0, "The complete release"** (tracking issue
 [#51](https://github.com/win07xp/kaalm/issues/51)): the security pass, the
 scale proof, the Agent Sandbox decision, and the docs audit.
 
-Beyond v0.7.0, items below remain the unscheduled backlog.
+The Agent Sandbox decision is made
+([#141](https://github.com/win07xp/kaalm/issues/141)): v1 stays on raw Pods
+and documents the RuntimeClass alternative, and the **v1.1.0** milestone
+opens with the isolation theme. It carries the `agentSandbox` runtime
+backend ([#167](https://github.com/win07xp/kaalm/issues/167)), gated on
+upstream shipping identity association and its first stable series earning
+a track record, and the verified microVM path, Kata first
+([#168](https://github.com/win07xp/kaalm/issues/168)).
+
+Beyond those two milestones, items below remain the unscheduled backlog.
 
 ## Beyond
 
@@ -84,8 +93,6 @@ they are likely to matter:
   one replica to own it; the v0.7.0 Discord adapter covers slash commands
   over HTTP instead. Tracked as
   [#124](https://github.com/win07xp/kaalm/issues/124).
-- **Agent Sandbox integration.** The `agentSandbox` runtime backend for
-  code-executing agents.
 - **Serving the `google-vertex` provider type.** The enum is reserved and
   the adapter's outbound pieces exist, but no inbound path is routed and
   the OAuth2 token minting the platform requires is not implemented
