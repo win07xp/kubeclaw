@@ -64,6 +64,9 @@ spec:
             - --activator-addr=:9443
             - --webhook-cert-path=/var/run/kaalm
             - --webhook-port=9444
+            {{- if .Values.controller.pprofPort }}
+            - --pprof-bind-address=:{{ .Values.controller.pprofPort }}
+            {{- end }}
             {{- $probeCAs := list }}
             {{- if .Values.controller.trustClusterCAForProbes }}
             {{- $probeCAs = append $probeCAs "/var/run/kaalm/ca.crt" }}
@@ -89,6 +92,10 @@ spec:
               containerPort: 9444
             - name: metrics
               containerPort: 8080
+            {{- if .Values.controller.pprofPort }}
+            - name: pprof
+              containerPort: {{ .Values.controller.pprofPort }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

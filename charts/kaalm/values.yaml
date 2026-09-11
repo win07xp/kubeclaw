@@ -24,6 +24,10 @@ controller:
   probeCA:
     configMap: ""
     key: ca.crt
+  # Port for a net/http/pprof listener, for profiling under load. 0 keeps it
+  # off, which is the production setting: the listener is unauthenticated
+  # and is meant to be reached through kubectl port-forward, never a Service.
+  pprofPort: 0
   networkPolicy:
     dnsSelector:
       namespaceLabels:
@@ -112,6 +116,9 @@ gateway:
   maxLLMRequestBodyBytes: 4Mi
   # Dedicated health/readiness port (kubelet probes).
   healthPort: 8081
+  # Port for a net/http/pprof listener, for profiling under load. 0 keeps it
+  # off, which is the production setting; see controller.pprofPort.
+  pprofPort: 0
 
 certManager:
   # cert-manager's cluster resource namespace. The kaalm-ca Certificate and its

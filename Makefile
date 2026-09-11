@@ -351,6 +351,9 @@ e2e: ## One-shot k3d e2e: recreate the cluster, build+import images, install the
 # produces publish in docs/src/operations/load-and-scale.md; the run is a
 # per-release local gate, not CI (see that page for why).
 LOAD_CLUSTER ?= kaalm-load
+# The load deploy opens the pprof listeners so a profile can be taken during
+# any phase; 0 turns them off.
+LOAD_PPROF_PORT ?= 6060
 LOAD_AGENT_NODES ?= 2
 LOAD_MAX_PODS ?= 250
 LOADGEN_IMG ?= registry.test/load/loadgen:load
@@ -384,6 +387,8 @@ load-deploy: chart-sync ## Install the chart onto the load cluster with the mock
 		--set gateway.trustClusterCAForCallbacks=true \
 		--set 'gateway.callbackUrl.allowlist={mock-provider.load.svc}' \
 		--set controller.trustClusterCAForProbes=true \
+		--set controller.pprofPort=$(LOAD_PPROF_PORT) \
+		--set gateway.pprofPort=$(LOAD_PPROF_PORT) \
 		--wait --timeout 5m
 
 .PHONY: load-run

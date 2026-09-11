@@ -38,6 +38,7 @@ import (
 	kaalmv1beta1 "github.com/win07xp/kaalm/api/v1beta1"
 	"github.com/win07xp/kaalm/internal/callbackpolicy"
 	"github.com/win07xp/kaalm/internal/gateway"
+	"github.com/win07xp/kaalm/internal/profiling"
 	"github.com/win07xp/kaalm/internal/tlsutil"
 )
 
@@ -57,6 +58,7 @@ func main() {
 		agentHostOverride    string
 		agentPortOverride    int
 		metricsAddr          string
+		pprofAddr            string
 		otlpEndpoint         string
 		otlpSampleRatio      float64
 		maxFallbackDepth     int
@@ -91,6 +93,8 @@ func main() {
 	flag.StringVar(&agentHostOverride, "agent-host-override", "", "redirect agent delivery dials to this host (dev only)")
 	flag.IntVar(&agentPortOverride, "agent-port-override", 0, "redirect agent delivery dials to this port (dev only)")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":9090", "Prometheus metrics listener address")
+	flag.StringVar(&pprofAddr, "pprof-addr", "",
+		"net/http/pprof listener address (debug only; empty disables it)")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "",
 		"OTLP/HTTP trace exporter base URL (for example http://collector:4318); empty disables tracing entirely")
 	flag.Float64Var(&otlpSampleRatio, "otlp-sample-ratio", 1.0,
@@ -269,6 +273,10 @@ func main() {
 			logger.Error("metrics listener failed", "error", err)
 		}
 	}()
+	// Profiling on its own port, only when asked for (debug only). The
+	// listener is unauthenticated and meant for a port-forward during a
+	// profiling session, never for a Service.
+	profiling.Start(pprofAddr, func(err error) { logger.Error("pprof listener failed", "error", err) })
 	if activatorClient, err := gateway.NewControllerActivator(
 		operatorNamespace, certFile, keyFile, caFile); err == nil {
 		server.Activator = activatorClient
