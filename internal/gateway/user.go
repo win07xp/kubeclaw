@@ -439,7 +439,7 @@ func deliveryOutcome(err error) string {
 }
 
 func (s *Server) deliverOnce(ctx context.Context, url string, payload []byte) ([]byte, error) {
-	attemptCtx, cancel := context.WithTimeout(ctx, s.Config.AgentReadTimeout)
+	attemptCtx, cancel := withAttemptDeadline(ctx, s.Config.AgentReadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -516,6 +516,27 @@ func (s *Server) agentHTTPClient() (*http.Client, error) {
 	return s.agentClient, s.agentClientErr
 }
 
+// attemptDeadlineKey carries an attempt's deadline to the transport's
+// dialer as a context value. net/http dials under a context detached from
+// the request's cancellation and deadline (so a finished dial can still be
+// pooled), which would leave a dialer without any view of the budget it is
+// spending; values survive that detachment.
+type attemptDeadlineKey struct{}
+
+// withAttemptDeadline bounds ctx by timeout and records the deadline for
+// the dialer.
+func withAttemptDeadline(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	deadline, _ := ctx.Deadline()
+	return context.WithValue(ctx, attemptDeadlineKey{}, deadline), cancel
+}
+
+// attemptDeadline reads the deadline withAttemptDeadline recorded.
+func attemptDeadline(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(attemptDeadlineKey{}).(time.Time)
+	return deadline, ok
+}
+
 // Dial stages, named in a dialStageError so a failed attempt's outcome says
 // whether the TCP connect or the TLS handshake failed.
 const (
@@ -532,11 +553,13 @@ type dialStageError struct {
 func (e *dialStageError) Error() string { return e.stage + ": " + e.err.Error() }
 func (e *dialStageError) Unwrap() error { return e.err }
 
-// dialAgentTLS is the delivery transport's dialer. The TCP connect is bound
-// by AgentConnectTimeout, the documented agentDeliveryConnectTimeout, so a
-// dropped SYN costs that long rather than the whole attempt; the handshake
-// runs under the attempt's context, which deliverOnce bounds by the read
-// timeout. Certificate and trust pool come from the loader per dial.
+// dialAgentTLS is the delivery transport's dialer. Each TCP connect is
+// bound by AgentConnectTimeout, the documented agentDeliveryConnectTimeout,
+// and a connect that hits it is retried on a fresh connection while the
+// attempt has budget, so a dropped SYN costs one bound rather than the
+// whole attempt. The handshake runs under the attempt's context, which
+// deliverOnce bounds by the read timeout. Certificate and trust pool come
+// from the loader per dial.
 func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
@@ -559,15 +582,36 @@ func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Conte
 			cfg.Certificates = []tls.Certificate{*cert}
 			cfg.RootCAs = pool
 		}
-		raw, err := (&net.Dialer{Timeout: s.Config.AgentConnectTimeout}).DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, &dialStageError{stage: dialStageConnect, err: err}
+		dialer := &net.Dialer{Timeout: s.Config.AgentConnectTimeout}
+		deadline, bounded := attemptDeadline(ctx)
+		var raw net.Conn
+		for {
+			var err error
+			raw, err = dialer.DialContext(ctx, network, addr)
+			if err == nil {
+				break
+			}
+			// A connect that hit its bound while the attempt still has budget
+			// is dialed again on a fresh connection: a dropped SYN costs one
+			// bound, and the new source port takes a new path through the
+			// data plane. Anything else, and an attempt out of time, fails
+			// the attempt.
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() || ctx.Err() != nil ||
+				(bounded && time.Until(deadline) <= dialer.Timeout) {
+				return nil, &dialStageError{stage: dialStageConnect, err: err}
+			}
+		}
+		if bounded {
+			_ = raw.SetDeadline(deadline)
 		}
 		conn := tls.Client(raw, cfg)
 		if err := conn.HandshakeContext(ctx); err != nil {
 			_ = raw.Close()
 			return nil, &dialStageError{stage: dialStageHandshake, err: err}
 		}
+		// A pooled connection carries no deadline; each request sets its own.
+		_ = raw.SetDeadline(time.Time{})
 		return conn, nil
 	}
 }

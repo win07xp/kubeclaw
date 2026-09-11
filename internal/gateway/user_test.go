@@ -776,26 +776,29 @@ func TestDeliverToAgentReusesTheConnection(t *testing.T) {
 	}
 }
 
-func TestDeliverToAgentBoundsTheConnect(t *testing.T) {
-	// A blackhole address: the SYN is never answered, so only the connect
-	// bound ends the attempt, and the outcome names the connect stage.
+func TestDeliverToAgentRedialsWithinTheAttempt(t *testing.T) {
+	// A blackhole address: the SYN is never answered. Each connect ends at
+	// its bound and is dialed again until the attempt's budget is spent, so
+	// an attempt lasts about the read timeout, not one connect bound, and
+	// its outcome names the connect stage.
 	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
 	s := NewServer(Config{
 		OperatorNamespace: "kaalm-system", AgentServiceHostOverride: "192.0.2.1", AgentServicePortOverride: 8443,
-		InsecureSkipAgentVerify: true, AgentReadTimeout: 5 * time.Second, AgentConnectTimeout: 50 * time.Millisecond,
+		InsecureSkipAgentVerify: true, AgentReadTimeout: 300 * time.Millisecond, AgentConnectTimeout: 50 * time.Millisecond,
 		DeliveryBackoff: []time.Duration{time.Millisecond},
 	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
 	s.Metrics = NewMetrics(prometheus.NewRegistry())
 
 	start := time.Now()
 	_, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: "m1"})
+	took := time.Since(start)
 	if err == nil {
 		t.Fatal("delivery to a blackhole must fail")
 	}
-	if took := time.Since(start); took > 2*time.Second {
-		t.Errorf("two attempts took %v; the connect bound did not apply", took)
+	if took < 500*time.Millisecond || took > 3*time.Second {
+		t.Errorf("two attempts took %v, want about two read timeouts of redials", took)
 	}
 	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeConnect)); got != 2 {
-		t.Errorf("connect outcomes = %v, want 2", got)
+		t.Errorf("connect outcomes = %v, want 2 (last error %q classified %q)", got, err, deliveryOutcome(err))
 	}
 }

@@ -66,6 +66,7 @@ func main() {
 		maxResponseBodyBytes int64
 		syncDeliveryDeadline time.Duration
 		agentReadTimeout     time.Duration
+		callbackReadTimeout  time.Duration
 		agentConnectTimeout  time.Duration
 		channelHealthWindow  time.Duration
 		deliveryBackoff      string
@@ -103,7 +104,8 @@ func main() {
 	flag.Int64Var(&maxMessageBodyBytes, "max-message-body-bytes", 1<<20, "inbound webhook body cap")
 	flag.Int64Var(&maxResponseBodyBytes, "max-response-body-bytes", 900<<10, "agent reply body cap")
 	flag.DurationVar(&syncDeliveryDeadline, "sync-delivery-deadline", 30*time.Second, "sync-mode wall-clock budget")
-	flag.DurationVar(&agentReadTimeout, "agent-read-timeout", 10*time.Second, "per-attempt agent/callback read timeout")
+	flag.DurationVar(&agentReadTimeout, "agent-read-timeout", 10*time.Second, "per-attempt agent read timeout")
+	flag.DurationVar(&callbackReadTimeout, "callback-read-timeout", 10*time.Second, "per-attempt callback read timeout")
 	flag.DurationVar(&agentConnectTimeout, "agent-connect-timeout", time.Second, "agent-delivery connect timeout")
 	flag.DurationVar(&channelHealthWindow, "channel-health-window", 5*time.Minute, "rolling window for PlatformConnected")
 	flag.StringVar(&deliveryBackoff, "delivery-backoff", "1s,5s,25s", "agent-delivery retry backoff (comma-separated)")
@@ -247,6 +249,7 @@ func main() {
 		MaxResponseBodyBytes:     maxResponseBodyBytes,
 		SyncDeliveryDeadline:     syncDeliveryDeadline,
 		AgentReadTimeout:         agentReadTimeout,
+		CallbackReadTimeout:      callbackReadTimeout,
 		AgentConnectTimeout:      agentConnectTimeout,
 		ChannelHealthWindow:      channelHealthWindow,
 		DeliveryBackoff:          mustParseBackoff(deliveryBackoff, "delivery-backoff", logger),

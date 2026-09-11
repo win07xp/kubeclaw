@@ -87,6 +87,8 @@ type Config struct {
 	MaxResponseBodyBytes int64
 	// AgentReadTimeout bounds each delivery attempt (default 10s).
 	AgentReadTimeout time.Duration
+	// CallbackReadTimeout bounds each callback attempt (default 10s).
+	CallbackReadTimeout time.Duration
 	// AgentConnectTimeout is the hibernation-detection connect bound (1s).
 	AgentConnectTimeout time.Duration
 	// SyncDeliveryDeadline bounds sync-mode wall-clock (default 30s).
@@ -158,6 +160,9 @@ type Server struct {
 	agentClientOnce sync.Once
 	agentClient     *http.Client
 	agentClientErr  error
+
+	callbackClientOnce sync.Once
+	callbackClient     *http.Client
 }
 
 // initOutboundCAs builds the file-backed outbound trust loaders once.
@@ -217,6 +222,9 @@ func NewServer(cfg Config, store Store, tokens *TokenAuthenticator, spend SpendR
 	}
 	if cfg.AgentReadTimeout == 0 {
 		cfg.AgentReadTimeout = 10 * time.Second
+	}
+	if cfg.CallbackReadTimeout == 0 {
+		cfg.CallbackReadTimeout = 10 * time.Second
 	}
 	if cfg.AgentConnectTimeout == 0 {
 		cfg.AgentConnectTimeout = time.Second
