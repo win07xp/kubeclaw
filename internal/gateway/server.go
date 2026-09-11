@@ -155,9 +155,9 @@ type Server struct {
 	upstreamCAs    *tlsutil.CAPoolLoader
 	callbackCAs    *tlsutil.CAPoolLoader
 
-	agentClientOnce   sync.Once
-	agentClientLoader *tlsutil.CertLoader
-	agentClientErr    error
+	agentClientOnce sync.Once
+	agentClient     *http.Client
+	agentClientErr  error
 }
 
 // initOutboundCAs builds the file-backed outbound trust loaders once.

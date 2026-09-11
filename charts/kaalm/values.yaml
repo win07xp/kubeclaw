@@ -24,6 +24,11 @@ controller:
   probeCA:
     configMap: ""
     key: ca.crt
+  # Reconciles the Agent, AgentChannel, and AgentTask controllers may each
+  # run at once. controller-runtime still serializes per object, so this only
+  # lets different objects reconcile in parallel; 1 is the strictly serial
+  # setting.
+  maxConcurrentReconciles: 4
   # Port for a net/http/pprof listener, for profiling under load. 0 keeps it
   # off, which is the production setting: the listener is unauthenticated
   # and is meant to be reached through kubectl port-forward, never a Service.

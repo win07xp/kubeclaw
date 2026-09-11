@@ -365,7 +365,7 @@ func (s *Server) deliverToAgent(
 			case <-time.After(delay):
 			}
 		}
-		respBody, err := s.deliverOnce(ctx, url, agent, payload)
+		respBody, err := s.deliverOnce(ctx, url, payload)
 		if err == nil {
 			s.Metrics.ChannelDeliveryAttempt(agent.Namespace, deliveryOutcomeOK)
 			return respBody, nil
@@ -403,10 +403,17 @@ const (
 // nested (url.Error over net.OpError over the syscall or DNS error), so the
 // classes are read from the chain first and from the message last.
 func deliveryOutcome(err error) string {
-	var dnsErr *net.DNSError
+	var (
+		dnsErr   *net.DNSError
+		stageErr *dialStageError
+	)
 	switch {
 	case errors.As(err, &dnsErr):
 		return deliveryOutcomeDNS
+	case errors.As(err, &stageErr) && stageErr.stage == dialStageConnect:
+		return deliveryOutcomeConnect
+	case errors.As(err, &stageErr):
+		return deliveryOutcomeTLS
 	case errors.Is(err, context.Canceled):
 		return deliveryOutcomeCanceled
 	case errors.Is(err, context.DeadlineExceeded):
@@ -431,7 +438,7 @@ func deliveryOutcome(err error) string {
 	return deliveryOutcomeOther
 }
 
-func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta1.Agent, payload []byte) ([]byte, error) {
+func (s *Server) deliverOnce(ctx context.Context, url string, payload []byte) ([]byte, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, s.Config.AgentReadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, url, bytes.NewReader(payload))
@@ -442,7 +449,7 @@ func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta
 	// The agent hop: the runtime attaches this context to every gateway
 	// call made while handling the message (runtime contract).
 	s.Tracing.Inject(attemptCtx, req.Header)
-	client, err := s.agentHTTPClient(agent)
+	client, err := s.agentHTTPClient()
 	if err != nil {
 		return nil, err
 	}
@@ -469,22 +476,28 @@ func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta
 	return respBody, nil
 }
 
-// agentHTTPClient builds (once) the mTLS client for gateway-to-agent
-// delivery: the gateway presents its own cert, verifies the agent's against
-// the Kaalm CA, and pins ServerName to the agent's Service DNS.
-func (s *Server) agentHTTPClient(agent *kaalmv1beta1.Agent) (*http.Client, error) {
-	tlsCfg := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		ServerName: fmt.Sprintf("%s.%s.svc.cluster.local", agent.Name, agent.Namespace),
-	}
-	if s.Config.InsecureSkipAgentVerify {
-		tlsCfg.InsecureSkipVerify = true // dev/test only
-	}
-	// A missing TLS identity (dev/test) sends no client cert; production
-	// always configures the gateway cert for the bidirectional mTLS contract.
-	if s.Config.CertFile != "" {
-		s.agentClientOnce.Do(func() {
-			loader := &tlsutil.CertLoader{CertFile: s.Config.CertFile, KeyFile: s.Config.KeyFile, CAFile: s.Config.CAFile}
+// agentMaxIdleConns bounds the delivery client's idle pool across every
+// Agent it has talked to. One or two connections per Agent stay open for the
+// transport's idle timeout, so a fleet's steady-state deliveries reuse them
+// and dial only when an Agent has been quiet longer than that.
+const agentMaxIdleConns = 1024
+
+// agentHTTPClient returns the one mTLS client for gateway-to-agent delivery.
+// The gateway presents its own cert, verifies the agent's against the Kaalm
+// CA, and pins ServerName to the host it dials, which is the agent's
+// Service DNS. Certificate and trust material are re-read per dial so
+// rotation applies to new connections without a restart. The client is
+// shared and pooled: the previous per-attempt transport dialed and ran a
+// handshake for every delivery, then kept the connection open forever, so a
+// gateway's open connections grew with every message it had ever delivered
+// (#172).
+func (s *Server) agentHTTPClient() (*http.Client, error) {
+	s.agentClientOnce.Do(func() {
+		var loader *tlsutil.CertLoader
+		// A missing TLS identity (dev/test) sends no client cert; production
+		// always configures the gateway cert for the bidirectional mTLS contract.
+		if s.Config.CertFile != "" {
+			loader = &tlsutil.CertLoader{CertFile: s.Config.CertFile, KeyFile: s.Config.KeyFile, CAFile: s.Config.CAFile}
 			if _, err := loader.Certificate(); err != nil {
 				s.agentClientErr = err
 				return
@@ -493,23 +506,70 @@ func (s *Server) agentHTTPClient(agent *kaalmv1beta1.Agent) (*http.Client, error
 				s.agentClientErr = err
 				return
 			}
-			s.agentClientLoader = loader
-		})
-		if s.agentClientErr != nil {
-			return nil, s.agentClientErr
 		}
-		cert, err := s.agentClientLoader.Certificate()
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConns = agentMaxIdleConns
+		transport.TLSClientConfig = nil
+		transport.DialTLSContext = s.dialAgentTLS(loader)
+		s.agentClient = &http.Client{Transport: transport}
+	})
+	return s.agentClient, s.agentClientErr
+}
+
+// Dial stages, named in a dialStageError so a failed attempt's outcome says
+// whether the TCP connect or the TLS handshake failed.
+const (
+	dialStageConnect   = "connect"
+	dialStageHandshake = "tls handshake"
+)
+
+// dialStageError wraps a dial failure with the stage it failed in.
+type dialStageError struct {
+	stage string
+	err   error
+}
+
+func (e *dialStageError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *dialStageError) Unwrap() error { return e.err }
+
+// dialAgentTLS is the delivery transport's dialer. The TCP connect is bound
+// by AgentConnectTimeout, the documented agentDeliveryConnectTimeout, so a
+// dropped SYN costs that long rather than the whole attempt; the handshake
+// runs under the attempt's context, which deliverOnce bounds by the read
+// timeout. Certificate and trust pool come from the loader per dial.
+func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
-			return nil, err
+			host = addr
 		}
-		pool, err := s.agentClientLoader.CAPool()
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}
+		if s.Config.InsecureSkipAgentVerify {
+			cfg.InsecureSkipVerify = true // dev/test only
+		}
+		if loader != nil {
+			cert, err := loader.Certificate()
+			if err != nil {
+				return nil, err
+			}
+			pool, err := loader.CAPool()
+			if err != nil {
+				return nil, err
+			}
+			cfg.Certificates = []tls.Certificate{*cert}
+			cfg.RootCAs = pool
+		}
+		raw, err := (&net.Dialer{Timeout: s.Config.AgentConnectTimeout}).DialContext(ctx, network, addr)
 		if err != nil {
-			return nil, err
+			return nil, &dialStageError{stage: dialStageConnect, err: err}
 		}
-		tlsCfg.Certificates = []tls.Certificate{*cert}
-		tlsCfg.RootCAs = pool
+		conn := tls.Client(raw, cfg)
+		if err := conn.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, &dialStageError{stage: dialStageHandshake, err: err}
+		}
+		return conn, nil
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}, nil
 }
 
 // NewControllerActivator builds the production activator client from the

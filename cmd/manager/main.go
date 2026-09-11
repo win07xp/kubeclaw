@@ -81,6 +81,7 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var pprofAddr string
+	var maxConcurrentReconciles int
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -91,6 +92,8 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 4,
+		"Reconciles the Agent, AgentChannel, and AgentTask controllers may each run at once.")
 	flag.StringVar(&pprofAddr, "pprof-bind-address", "",
 		"The address the net/http/pprof endpoint binds to (debug only; empty disables it).")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -336,18 +339,20 @@ func main() {
 	}
 
 	if err := (&controller.AgentReconciler{
-		Client:            mgr.GetClient(),
-		Recorder:          mgr.GetEventRecorderFor("agent-controller"),
-		OperatorNamespace: operatorNamespace,
-		Activity:          activityClient,
+		Client:                  mgr.GetClient(),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
+		Recorder:                mgr.GetEventRecorderFor("agent-controller"),
+		OperatorNamespace:       operatorNamespace,
+		Activity:                activityClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
 	if err := (&controller.AgentTaskReconciler{
-		Client:            mgr.GetClient(),
-		Recorder:          mgr.GetEventRecorderFor("agenttask-controller"),
-		OperatorNamespace: operatorNamespace,
+		Client:                  mgr.GetClient(),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
+		Recorder:                mgr.GetEventRecorderFor("agenttask-controller"),
+		OperatorNamespace:       operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentTask")
 		os.Exit(1)
@@ -360,11 +365,12 @@ func main() {
 	}
 
 	if err := (&controller.AgentChannelReconciler{
-		Client:            mgr.GetClient(),
-		Recorder:          mgr.GetEventRecorderFor("agentchannel-controller"),
-		OperatorNamespace: operatorNamespace,
-		Health:            channelHealthClient,
-		CallbackPolicy:    managerCallbackPolicy,
+		Client:                  mgr.GetClient(),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
+		Recorder:                mgr.GetEventRecorderFor("agentchannel-controller"),
+		OperatorNamespace:       operatorNamespace,
+		Health:                  channelHealthClient,
+		CallbackPolicy:          managerCallbackPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentChannel")
 		os.Exit(1)

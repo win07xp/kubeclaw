@@ -32,8 +32,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -42,6 +40,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kaalmv1beta1 "github.com/win07xp/kaalm/api/v1beta1"
@@ -552,22 +552,24 @@ func TestAgentHTTPClient_WithCertFiles(t *testing.T) {
 	ca := newTestCA(t)
 	certFile, keyFile, caFile := certFiles(t, ca, "gw")
 	s := &Server{Config: Config{CertFile: certFile, KeyFile: keyFile, CAFile: caFile}}
-	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
 
-	client, err := s.agentHTTPClient(agent)
+	client, err := s.agentHTTPClient()
 	if err != nil || client == nil {
 		t.Fatalf("agentHTTPClient = %v err=%v", client, err)
 	}
-	// The loader is memoized: a second call reuses it without error.
-	if _, err := s.agentHTTPClient(agent); err != nil {
-		t.Errorf("second agentHTTPClient: %v", err)
+	// One client for every delivery: a second call returns the same one.
+	if again, err := s.agentHTTPClient(); err != nil || again != client {
+		t.Errorf("second agentHTTPClient = %p err=%v, want the shared %p", again, err, client)
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok || tr.DialTLSContext == nil || tr.MaxIdleConns != agentMaxIdleConns {
+		t.Errorf("delivery transport = %#v, want a pooled transport with the mTLS dialer", client.Transport)
 	}
 }
 
 func TestAgentHTTPClient_BadCertFiles(t *testing.T) {
 	s := &Server{Config: Config{CertFile: "/nonexistent/tls.crt", KeyFile: "/nonexistent/tls.key", CAFile: "/nonexistent/ca.crt"}}
-	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
-	if _, err := s.agentHTTPClient(agent); err == nil {
+	if _, err := s.agentHTTPClient(); err == nil {
 		t.Error("missing cert files must error")
 	}
 }
@@ -669,6 +671,8 @@ func TestDeliveryOutcomeClassifiesTheFailingLayer(t *testing.T) {
 		{"canceled", fmt.Errorf("Post: %w", context.Canceled), deliveryOutcomeCanceled},
 		{"io timeout", errors.New("read tcp 10.0.0.1:1->10.0.0.2:8443: i/o timeout"), deliveryOutcomeTimeout},
 		{"refused", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}}, deliveryOutcomeConnect},
+		{"connect stage", &url.Error{Op: "Post", Err: &dialStageError{stage: dialStageConnect, err: context.DeadlineExceeded}}, deliveryOutcomeConnect},
+		{"handshake stage", &url.Error{Op: "Post", Err: &dialStageError{stage: dialStageHandshake, err: context.DeadlineExceeded}}, deliveryOutcomeTLS},
 		{"reset", errors.New("read: connection reset by peer"), deliveryOutcomeConnect},
 		{"tls", &url.Error{Op: "Post", Err: x509.UnknownAuthorityError{}}, deliveryOutcomeTLS},
 		{"status", errors.New("agent returned 503"), deliveryOutcomeStatus},
@@ -737,5 +741,61 @@ func TestDeliverToAgentCountsEveryAttemptByOutcome(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeOK)); got != 1 {
 		t.Errorf("ok attempts = %v, want 1", got)
+	}
+}
+
+func TestDeliverToAgentReusesTheConnection(t *testing.T) {
+	var opened int32
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"content":"hi"}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			atomic.AddInt32(&opened, 1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "https://"), ":")
+	port, _ := strconv.Atoi(portStr)
+	s := NewServer(Config{
+		OperatorNamespace: "kaalm-system", AgentServiceHostOverride: host, AgentServicePortOverride: int32(port),
+		InsecureSkipAgentVerify: true, AgentReadTimeout: 2 * time.Second, AgentConnectTimeout: time.Second,
+		MaxResponseBodyBytes: 1 << 20,
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: fmt.Sprintf("m%d", i)}); err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&opened); got != 1 {
+		t.Errorf("agent saw %d connections for 5 deliveries, want 1 (the pooled connection)", got)
+	}
+}
+
+func TestDeliverToAgentBoundsTheConnect(t *testing.T) {
+	// A blackhole address: the SYN is never answered, so only the connect
+	// bound ends the attempt, and the outcome names the connect stage.
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	s := NewServer(Config{
+		OperatorNamespace: "kaalm-system", AgentServiceHostOverride: "192.0.2.1", AgentServicePortOverride: 8443,
+		InsecureSkipAgentVerify: true, AgentReadTimeout: 5 * time.Second, AgentConnectTimeout: 50 * time.Millisecond,
+		DeliveryBackoff: []time.Duration{time.Millisecond},
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+
+	start := time.Now()
+	_, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: "m1"})
+	if err == nil {
+		t.Fatal("delivery to a blackhole must fail")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("two attempts took %v; the connect bound did not apply", took)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeConnect)); got != 2 {
+		t.Errorf("connect outcomes = %v, want 2", got)
 	}
 }

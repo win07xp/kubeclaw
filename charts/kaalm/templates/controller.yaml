@@ -64,6 +64,7 @@ spec:
             - --activator-addr=:9443
             - --webhook-cert-path=/var/run/kaalm
             - --webhook-port=9444
+            - --max-concurrent-reconciles={{ .Values.controller.maxConcurrentReconciles }}
             {{- if .Values.controller.pprofPort }}
             - --pprof-bind-address=:{{ .Values.controller.pprofPort }}
             {{- end }}

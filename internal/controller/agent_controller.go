@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -69,6 +70,9 @@ type AgentReconciler struct {
 	// OperatorNamespace hosts the gateway and controller (kaalm-system).
 	// Agents in this namespace are rejected to protect SAN integrity.
 	OperatorNamespace string
+	// MaxConcurrentReconciles is the number of reconciles that may run at
+	// once; controller-runtime still serializes per object. 0 means one.
+	MaxConcurrentReconciles int
 	// Activity fetches per-namespace gateway activity for idle detection.
 	// nil disables idle and hibernation transitions (no data, no evidence).
 	Activity ActivityClient
@@ -916,6 +920,7 @@ func (r *AgentReconciler) setReady(agent *kaalmv1beta1.Agent, ok bool, reason, m
 // platform-level map-func watches.
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		For(&kaalmv1beta1.Agent{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.Service{}).

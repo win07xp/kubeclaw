@@ -48,4 +48,4 @@ The gateway and controller mutually verify against the Kaalm CA (`kaalm-ca`). Th
 - AgentTask timeout checking: requeue at `startTime + timeout + small jitter` when in Running state. `status.startTime` is stamped at the Provisioning→Running transition (Pod Ready), so scheduling and image-pull time never count against `spec.completion.timeout`; a task stuck before Running is bounded separately by the fixed 5-minute provisioning deadline (see [AgentTask](task-lifecycle.md)).
 - Idle detection: requeue at `lastActivityTime + idleTimeout` when in Running state.
 
-The operator should handle 1000+ Agents and AgentTasks per cluster without issue. Use indexed caches for all cross-resource lookups.
+The operator should handle 1000+ Agents and AgentTasks per cluster without issue. Use indexed caches for all cross-resource lookups. The Agent, AgentChannel, and AgentTask controllers each run up to `controller.maxConcurrentReconciles` reconciles at once (default 4; see [Deployment](../operations/deployment.md)); controller-runtime serializes reconciles of the same object at any setting, so the reconcilers hold no state across objects that concurrency could race.

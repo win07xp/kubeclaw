@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -84,6 +85,9 @@ type AgentChannelReconciler struct {
 	client.Client
 	Recorder          record.EventRecorder
 	OperatorNamespace string
+	// MaxConcurrentReconciles is the number of reconciles that may run at
+	// once; controller-runtime still serializes per object. 0 means one.
+	MaxConcurrentReconciles int
 	// Health polls per-channel gateway delivery health; nil preserves the
 	// existing PlatformConnected condition.
 	Health ChannelHealthClient
@@ -624,6 +628,7 @@ func (r *AgentChannelReconciler) setChannelReady(channel *kaalmv1beta1.AgentChan
 // watch (phase reduction must track Agent phase changes).
 func (r *AgentChannelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		For(&kaalmv1beta1.AgentChannel{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
