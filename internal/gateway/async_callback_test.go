@@ -20,9 +20,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,5 +281,54 @@ func TestHandlePoll_TTLExpired(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("expired record = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestDialCallbackOnce_ReusesTheConnection: attempts to one receiver ride a
+// pooled connection instead of dialing and handshaking each time, and the
+// pooled client still dials only the pinned address.
+func TestDialCallbackOnce_ReusesTheConnection(t *testing.T) {
+	ca := newTestCA(t)
+	cert := ca.issue(t, "callback.test")
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened int32
+	srv := &http.Server{
+		ReadHeaderTimeout: time.Second,
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		ConnState: func(_ net.Conn, st http.ConnState) {
+			if st == http.StateNew {
+				atomic.AddInt32(&opened, 1)
+			}
+		},
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	s := callbackClientServer(t, ca)
+	parsed, _ := url.Parse("https://callback.test:" + port + "/cb")
+	ch := &kaalmv1beta1.AgentChannel{
+		ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "team-a"},
+		Spec:       kaalmv1beta1.AgentChannelSpec{Webhook: &kaalmv1beta1.AgentChannelWebhook{}},
+	}
+	for i := 0; i < 3; i++ {
+		status, err := s.dialCallbackOnce(context.Background(), parsed, net.ParseIP("127.0.0.1"),
+			ch, "", fmt.Sprintf("req-%d", i), []byte(`{}`))
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("attempt %d: status %d err %v", i, status, err)
+		}
+	}
+	if got := atomic.LoadInt32(&opened); got != 1 {
+		t.Errorf("receiver saw %d connections for 3 attempts, want 1", got)
+	}
+	// Without a pinned address the pooled dialer refuses to dial at all
+	// (a host:port with no pooled connection, so a dial is needed).
+	client := s.callbackHTTPClient()
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://callback.test:1/cb", nil)
+	if _, err := client.Do(req); err == nil || !strings.Contains(err.Error(), "range-checked") {
+		t.Errorf("dial without a pinned address = %v, want a refusal", err)
 	}
 }

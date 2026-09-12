@@ -17,6 +17,14 @@ limitations under the License.
 package gateway
 
 import (
+	"crypto/x509"
+	"errors"
+	"net"
+	"net/url"
+	"os"
+	"sync/atomic"
+	"syscall"
+
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -32,6 +40,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kaalmv1beta1 "github.com/win07xp/kaalm/api/v1beta1"
@@ -542,22 +552,24 @@ func TestAgentHTTPClient_WithCertFiles(t *testing.T) {
 	ca := newTestCA(t)
 	certFile, keyFile, caFile := certFiles(t, ca, "gw")
 	s := &Server{Config: Config{CertFile: certFile, KeyFile: keyFile, CAFile: caFile}}
-	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
 
-	client, err := s.agentHTTPClient(agent)
+	client, err := s.agentHTTPClient()
 	if err != nil || client == nil {
 		t.Fatalf("agentHTTPClient = %v err=%v", client, err)
 	}
-	// The loader is memoized: a second call reuses it without error.
-	if _, err := s.agentHTTPClient(agent); err != nil {
-		t.Errorf("second agentHTTPClient: %v", err)
+	// One client for every delivery: a second call returns the same one.
+	if again, err := s.agentHTTPClient(); err != nil || again != client {
+		t.Errorf("second agentHTTPClient = %p err=%v, want the shared %p", again, err, client)
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok || tr.DialTLSContext == nil || tr.MaxIdleConns != agentMaxIdleConns {
+		t.Errorf("delivery transport = %#v, want a pooled transport with the mTLS dialer", client.Transport)
 	}
 }
 
 func TestAgentHTTPClient_BadCertFiles(t *testing.T) {
 	s := &Server{Config: Config{CertFile: "/nonexistent/tls.crt", KeyFile: "/nonexistent/tls.key", CAFile: "/nonexistent/ca.crt"}}
-	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
-	if _, err := s.agentHTTPClient(agent); err == nil {
+	if _, err := s.agentHTTPClient(); err == nil {
 		t.Error("missing cert files must error")
 	}
 }
@@ -646,4 +658,206 @@ func TestWebhook_DeliveryRecordsActivity(t *testing.T) {
 	if _, ok := h2.server.Activity.Snapshot("team-a").Agents["sup"]; ok {
 		t.Error("a failed delivery must not count as activity")
 	}
+}
+
+func TestDeliveryOutcomeClassifiesTheFailingLayer(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"dns", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: &net.DNSError{Name: "a.b.svc", IsTimeout: true}}}, deliveryOutcomeDNS},
+		{"deadline", fmt.Errorf("Post: %w", context.DeadlineExceeded), deliveryOutcomeTimeout},
+		{"canceled", fmt.Errorf("Post: %w", context.Canceled), deliveryOutcomeCanceled},
+		{"io timeout", errors.New("read tcp 10.0.0.1:1->10.0.0.2:8443: i/o timeout"), deliveryOutcomeTimeout},
+		{"refused", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}}, deliveryOutcomeConnect},
+		{"connect stage", &url.Error{Op: "Post", Err: &dialStageError{stage: dialStageConnect, err: context.DeadlineExceeded}}, deliveryOutcomeConnect},
+		{"handshake stage", &url.Error{Op: "Post", Err: &dialStageError{stage: dialStageHandshake, err: context.DeadlineExceeded}}, deliveryOutcomeTLS},
+		{"reset", errors.New("read: connection reset by peer"), deliveryOutcomeConnect},
+		{"tls", &url.Error{Op: "Post", Err: x509.UnknownAuthorityError{}}, deliveryOutcomeTLS},
+		{"status", errors.New("agent returned 503"), deliveryOutcomeStatus},
+		{"malformed", errors.New("agent returned 200 with a malformed response envelope"), deliveryOutcomeMalformed},
+		{"too large", errors.New("agent response body exceeded 921600 bytes; externalize large outputs and reference by URL"), deliveryOutcomeTooLarge},
+		{"other", errors.New("boom"), deliveryOutcomeOther},
+	}
+	for _, c := range cases {
+		if got := deliveryOutcome(c.err); got != c.want {
+			t.Errorf("%s: deliveryOutcome(%v) = %q, want %q", c.name, c.err, got, c.want)
+		}
+	}
+}
+
+// deliveryServer returns a Server whose agent deliveries land on fn, with a
+// fast retry schedule and a registry of its own for the attempt counter.
+func deliveryServer(t *testing.T, fn http.HandlerFunc) *Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(fn)
+	t.Cleanup(srv.Close)
+	host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "https://"), ":")
+	port, _ := strconv.Atoi(portStr)
+	s := NewServer(Config{
+		OperatorNamespace:        "kaalm-system",
+		DeliveryBackoff:          []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
+		AgentServiceHostOverride: host,
+		AgentServicePortOverride: int32(port),
+		InsecureSkipAgentVerify:  true,
+		AgentReadTimeout:         2 * time.Second,
+		MaxResponseBodyBytes:     1 << 20,
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+	return s
+}
+
+func TestDeliverToAgentCountsEveryAttemptByOutcome(t *testing.T) {
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	env := MessageEnvelope{MessageID: "m1"}
+
+	// Every attempt answers 503: four attempts, all "status", none "ok".
+	s := deliveryServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	if _, err := s.deliverToAgent(context.Background(), agent, env); err == nil {
+		t.Fatal("delivery against a 503 agent must fail")
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeStatus)); got != 4 {
+		t.Errorf("status attempts = %v, want 4", got)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeOK)); got != 0 {
+		t.Errorf("ok attempts = %v, want 0", got)
+	}
+
+	// One 503 then success: one "status", one "ok".
+	var calls int32
+	s = deliveryServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"content":"hi"}`))
+	})
+	if _, err := s.deliverToAgent(context.Background(), agent, env); err != nil {
+		t.Fatalf("delivery must succeed on the second attempt: %v", err)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeStatus)); got != 1 {
+		t.Errorf("status attempts = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeOK)); got != 1 {
+		t.Errorf("ok attempts = %v, want 1", got)
+	}
+}
+
+func TestDeliverToAgentReusesTheConnection(t *testing.T) {
+	var opened int32
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"content":"hi"}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			atomic.AddInt32(&opened, 1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "https://"), ":")
+	port, _ := strconv.Atoi(portStr)
+	s := NewServer(Config{
+		OperatorNamespace: "kaalm-system", AgentServiceHostOverride: host, AgentServicePortOverride: int32(port),
+		InsecureSkipAgentVerify: true, AgentReadTimeout: 2 * time.Second, AgentConnectTimeout: time.Second,
+		MaxResponseBodyBytes: 1 << 20,
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: fmt.Sprintf("m%d", i)}); err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&opened); got != 1 {
+		t.Errorf("agent saw %d connections for 5 deliveries, want 1 (the pooled connection)", got)
+	}
+}
+
+func TestDeliverToAgentRedialsWithinTheAttempt(t *testing.T) {
+	// A blackhole address: the SYN is never answered. Each connect ends at
+	// its bound and is dialed again until the attempt's budget is spent, so
+	// an attempt lasts about the read timeout, not one connect bound, and
+	// its outcome names the connect stage.
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	s := NewServer(Config{
+		OperatorNamespace: "kaalm-system", AgentServiceHostOverride: "192.0.2.1", AgentServicePortOverride: 8443,
+		InsecureSkipAgentVerify: true, AgentReadTimeout: 300 * time.Millisecond, AgentConnectTimeout: 50 * time.Millisecond,
+		DeliveryBackoff: []time.Duration{time.Millisecond},
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+	resolver := &countingResolver{ip: net.ParseIP("192.0.2.1")}
+	s.AgentResolver = resolver
+
+	start := time.Now()
+	_, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: "m1"})
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("delivery to a blackhole must fail")
+	}
+	if took < 500*time.Millisecond || took > 3*time.Second {
+		t.Errorf("two attempts took %v, want about two read timeouts of redials", took)
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeConnect)); got != 2 {
+		t.Errorf("connect outcomes = %v, want 2 (last error %q classified %q)", got, err, deliveryOutcome(err))
+	}
+	// One resolution per attempt, however many connects the attempt redials.
+	if got := atomic.LoadInt32(&resolver.calls); got != 2 {
+		t.Errorf("resolver called %d times for 2 attempts, want 2", got)
+	}
+}
+
+// countingResolver answers every lookup with one IP and counts the calls.
+type countingResolver struct {
+	ip    net.IP
+	calls int32
+}
+
+func (r *countingResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	atomic.AddInt32(&r.calls, 1)
+	return []net.IPAddr{{IP: r.ip}}, nil
+}
+
+func TestAbsoluteDialName(t *testing.T) {
+	cases := map[string]string{
+		"sup.team-a.svc.cluster.local":  "sup.team-a.svc.cluster.local.",
+		"sup.team-a.svc.cluster.local.": "sup.team-a.svc.cluster.local.",
+		"10.0.0.5":                      "10.0.0.5",
+		"::1":                           "::1",
+		"":                              "",
+	}
+	for in, want := range cases {
+		if got := absoluteDialName(in); got != want {
+			t.Errorf("absoluteDialName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDeliverToAgentResolutionTimeoutIsDNS(t *testing.T) {
+	agent := &kaalmv1beta1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "sup", Namespace: "team-a"}}
+	s := NewServer(Config{
+		OperatorNamespace: "kaalm-system", InsecureSkipAgentVerify: true,
+		AgentReadTimeout: 200 * time.Millisecond, AgentConnectTimeout: 50 * time.Millisecond,
+		DeliveryBackoff: []time.Duration{time.Millisecond},
+	}, &fakeStore{}, NewTokenAuthenticator(&fakeReviewer{}), NewMemorySpend())
+	s.Metrics = NewMetrics(prometheus.NewRegistry())
+	s.AgentResolver = &stallingResolver{}
+
+	if _, err := s.deliverToAgent(context.Background(), agent, MessageEnvelope{MessageID: "m1"}); err == nil {
+		t.Fatal("delivery with a stalled resolver must fail")
+	}
+	if got := testutil.ToFloat64(s.Metrics.channelDelivery.WithLabelValues("team-a", deliveryOutcomeDNS)); got != 2 {
+		t.Errorf("dns outcomes = %v, want 2", got)
+	}
+}
+
+// stallingResolver never answers; it returns the context's deadline as a
+// DNS timeout, the shape net.Resolver produces.
+type stallingResolver struct{}
+
+func (stallingResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	<-ctx.Done()
+	return nil, &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
 }

@@ -1084,6 +1084,62 @@
       }
     },
     {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Agent delivery attempts by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (outcome) (rate(kaalm_channel_delivery_attempts_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "refId": "A",
+          "range": true,
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Every POST /v1/message attempt, retries included, by the layer that failed. A rising timeout, connect, or tls rate names where deliveries stall."
+    },
+    {
       "id": 20,
       "type": "stat",
       "title": "Oversized responses (range)",

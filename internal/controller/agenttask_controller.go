@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,6 +56,9 @@ type AgentTaskReconciler struct {
 	client.Client
 	Recorder          record.EventRecorder
 	OperatorNamespace string
+	// MaxConcurrentReconciles is the number of reconciles that may run at
+	// once; controller-runtime still serializes per object. 0 means one.
+	MaxConcurrentReconciles int
 }
 
 // +kubebuilder:rbac:groups=kaalm.io,resources=agenttasks,verbs=get;list;watch;update;patch;delete
@@ -717,6 +721,7 @@ func (r *AgentTaskReconciler) setTaskReady(task *kaalmv1beta1.AgentTask, ok bool
 // completion mailbox and its RBAC pair), and the AgentClass map-func watch.
 func (r *AgentTaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		For(&kaalmv1beta1.AgentTask{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).

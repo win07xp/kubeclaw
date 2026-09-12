@@ -87,6 +87,8 @@ type Config struct {
 	MaxResponseBodyBytes int64
 	// AgentReadTimeout bounds each delivery attempt (default 10s).
 	AgentReadTimeout time.Duration
+	// CallbackReadTimeout bounds each callback attempt (default 10s).
+	CallbackReadTimeout time.Duration
 	// AgentConnectTimeout is the hibernation-detection connect bound (1s).
 	AgentConnectTimeout time.Duration
 	// SyncDeliveryDeadline bounds sync-mode wall-clock (default 30s).
@@ -155,9 +157,21 @@ type Server struct {
 	upstreamCAs    *tlsutil.CAPoolLoader
 	callbackCAs    *tlsutil.CAPoolLoader
 
-	agentClientOnce   sync.Once
-	agentClientLoader *tlsutil.CertLoader
-	agentClientErr    error
+	agentClientOnce sync.Once
+	agentClient     *http.Client
+	agentClientErr  error
+
+	callbackClientOnce sync.Once
+	callbackClient     *http.Client
+
+	// AgentResolver resolves agent Service names for delivery dials; nil
+	// means net.DefaultResolver. Tests inject a counting fake.
+	AgentResolver ipResolver
+}
+
+// ipResolver is the slice of net.Resolver the delivery dialer uses.
+type ipResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 // initOutboundCAs builds the file-backed outbound trust loaders once.
@@ -217,6 +231,9 @@ func NewServer(cfg Config, store Store, tokens *TokenAuthenticator, spend SpendR
 	}
 	if cfg.AgentReadTimeout == 0 {
 		cfg.AgentReadTimeout = 10 * time.Second
+	}
+	if cfg.CallbackReadTimeout == 0 {
+		cfg.CallbackReadTimeout = 10 * time.Second
 	}
 	if cfg.AgentConnectTimeout == 0 {
 		cfg.AgentConnectTimeout = time.Second

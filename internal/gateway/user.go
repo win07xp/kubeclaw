@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -364,21 +365,81 @@ func (s *Server) deliverToAgent(
 			case <-time.After(delay):
 			}
 		}
-		respBody, err := s.deliverOnce(ctx, url, agent, payload)
+		respBody, err := s.deliverOnce(ctx, url, payload)
 		if err == nil {
+			s.Metrics.ChannelDeliveryAttempt(agent.Namespace, deliveryOutcomeOK)
 			return respBody, nil
 		}
 		lastErr = err
-		if strings.Contains(err.Error(), "response body exceeded") {
+		outcome := deliveryOutcome(err)
+		s.Metrics.ChannelDeliveryAttempt(agent.Namespace, outcome)
+		slog.Warn("agent delivery attempt failed",
+			"namespace", agent.Namespace, "agent", agent.Name, "messageId", env.MessageID,
+			"attempt", attempt+1, "of", len(backoff), "outcome", outcome, "error", err.Error())
+		if outcome == deliveryOutcomeTooLarge {
 			return nil, err // size violations are not retried
 		}
-		_ = attempt
 	}
 	return nil, fmt.Errorf("failed to deliver message to agent after %d attempts: %w", len(backoff), lastErr)
 }
 
-func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta1.Agent, payload []byte) ([]byte, error) {
-	attemptCtx, cancel := context.WithTimeout(ctx, s.Config.AgentReadTimeout)
+// Delivery attempt outcomes, the "outcome" label of
+// kaalm_channel_delivery_attempts_total. The failure classes name the layer
+// that failed so a retry rate can be read back to a cause (#172).
+const (
+	deliveryOutcomeOK        = "ok"
+	deliveryOutcomeDNS       = "dns"       // name resolution failed or timed out
+	deliveryOutcomeConnect   = "connect"   // TCP connect refused, reset, or unreachable
+	deliveryOutcomeTLS       = "tls"       // handshake or certificate verification
+	deliveryOutcomeTimeout   = "timeout"   // the per-attempt deadline elapsed
+	deliveryOutcomeStatus    = "status"    // the agent answered outside 2xx
+	deliveryOutcomeMalformed = "malformed" // 2xx with an unusable envelope
+	deliveryOutcomeTooLarge  = "too_large" // reply over the body cap; not retried
+	deliveryOutcomeCanceled  = "canceled"  // the delivery's own context ended
+	deliveryOutcomeOther     = "other"
+)
+
+// deliveryOutcome classifies one failed attempt. Go's net errors are
+// nested (url.Error over net.OpError over the syscall or DNS error), so the
+// classes are read from the chain first and from the message last.
+func deliveryOutcome(err error) string {
+	var (
+		dnsErr   *net.DNSError
+		stageErr *dialStageError
+	)
+	switch {
+	case errors.As(err, &dnsErr):
+		return deliveryOutcomeDNS
+	case errors.As(err, &stageErr) && stageErr.stage == dialStageConnect:
+		return deliveryOutcomeConnect
+	case errors.As(err, &stageErr):
+		return deliveryOutcomeTLS
+	case errors.Is(err, context.Canceled):
+		return deliveryOutcomeCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return deliveryOutcomeTimeout
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "response body exceeded"):
+		return deliveryOutcomeTooLarge
+	case strings.Contains(msg, "malformed response envelope"):
+		return deliveryOutcomeMalformed
+	case strings.HasPrefix(msg, "agent returned "):
+		return deliveryOutcomeStatus
+	case strings.Contains(msg, "tls:") || strings.Contains(msg, "x509:"):
+		return deliveryOutcomeTLS
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "no route to host") || strings.Contains(msg, "network is unreachable"):
+		return deliveryOutcomeConnect
+	case strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "Client.Timeout"):
+		return deliveryOutcomeTimeout
+	}
+	return deliveryOutcomeOther
+}
+
+func (s *Server) deliverOnce(ctx context.Context, url string, payload []byte) ([]byte, error) {
+	attemptCtx, cancel := withAttemptDeadline(ctx, s.Config.AgentReadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -388,7 +449,7 @@ func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta
 	// The agent hop: the runtime attaches this context to every gateway
 	// call made while handling the message (runtime contract).
 	s.Tracing.Inject(attemptCtx, req.Header)
-	client, err := s.agentHTTPClient(agent)
+	client, err := s.agentHTTPClient()
 	if err != nil {
 		return nil, err
 	}
@@ -415,22 +476,28 @@ func (s *Server) deliverOnce(ctx context.Context, url string, agent *kaalmv1beta
 	return respBody, nil
 }
 
-// agentHTTPClient builds (once) the mTLS client for gateway-to-agent
-// delivery: the gateway presents its own cert, verifies the agent's against
-// the Kaalm CA, and pins ServerName to the agent's Service DNS.
-func (s *Server) agentHTTPClient(agent *kaalmv1beta1.Agent) (*http.Client, error) {
-	tlsCfg := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		ServerName: fmt.Sprintf("%s.%s.svc.cluster.local", agent.Name, agent.Namespace),
-	}
-	if s.Config.InsecureSkipAgentVerify {
-		tlsCfg.InsecureSkipVerify = true // dev/test only
-	}
-	// A missing TLS identity (dev/test) sends no client cert; production
-	// always configures the gateway cert for the bidirectional mTLS contract.
-	if s.Config.CertFile != "" {
-		s.agentClientOnce.Do(func() {
-			loader := &tlsutil.CertLoader{CertFile: s.Config.CertFile, KeyFile: s.Config.KeyFile, CAFile: s.Config.CAFile}
+// agentMaxIdleConns bounds the delivery client's idle pool across every
+// Agent it has talked to. One or two connections per Agent stay open for the
+// transport's idle timeout, so a fleet's steady-state deliveries reuse them
+// and dial only when an Agent has been quiet longer than that.
+const agentMaxIdleConns = 1024
+
+// agentHTTPClient returns the one mTLS client for gateway-to-agent delivery.
+// The gateway presents its own cert, verifies the agent's against the Kaalm
+// CA, and pins ServerName to the host it dials, which is the agent's
+// Service DNS. Certificate and trust material are re-read per dial so
+// rotation applies to new connections without a restart. The client is
+// shared and pooled: the previous per-attempt transport dialed and ran a
+// handshake for every delivery, then kept the connection open forever, so a
+// gateway's open connections grew with every message it had ever delivered
+// (#172).
+func (s *Server) agentHTTPClient() (*http.Client, error) {
+	s.agentClientOnce.Do(func() {
+		var loader *tlsutil.CertLoader
+		// A missing TLS identity (dev/test) sends no client cert; production
+		// always configures the gateway cert for the bidirectional mTLS contract.
+		if s.Config.CertFile != "" {
+			loader = &tlsutil.CertLoader{CertFile: s.Config.CertFile, KeyFile: s.Config.KeyFile, CAFile: s.Config.CAFile}
 			if _, err := loader.Certificate(); err != nil {
 				s.agentClientErr = err
 				return
@@ -439,23 +506,165 @@ func (s *Server) agentHTTPClient(agent *kaalmv1beta1.Agent) (*http.Client, error
 				s.agentClientErr = err
 				return
 			}
-			s.agentClientLoader = loader
-		})
-		if s.agentClientErr != nil {
-			return nil, s.agentClientErr
 		}
-		cert, err := s.agentClientLoader.Certificate()
-		if err != nil {
-			return nil, err
-		}
-		pool, err := s.agentClientLoader.CAPool()
-		if err != nil {
-			return nil, err
-		}
-		tlsCfg.Certificates = []tls.Certificate{*cert}
-		tlsCfg.RootCAs = pool
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConns = agentMaxIdleConns
+		transport.TLSClientConfig = nil
+		transport.DialTLSContext = s.dialAgentTLS(loader)
+		s.agentClient = &http.Client{Transport: transport}
+	})
+	return s.agentClient, s.agentClientErr
+}
+
+// attemptDeadlineKey carries an attempt's deadline to the transport's
+// dialer as a context value. net/http dials under a context detached from
+// the request's cancellation and deadline (so a finished dial can still be
+// pooled), which would leave a dialer without any view of the budget it is
+// spending; values survive that detachment.
+type attemptDeadlineKey struct{}
+
+// withAttemptDeadline bounds ctx by timeout and records the deadline for
+// the dialer.
+func withAttemptDeadline(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	deadline, _ := ctx.Deadline()
+	return context.WithValue(ctx, attemptDeadlineKey{}, deadline), cancel
+}
+
+// attemptDeadline reads the deadline withAttemptDeadline recorded.
+func attemptDeadline(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(attemptDeadlineKey{}).(time.Time)
+	return deadline, ok
+}
+
+// Dial stages, named in a dialStageError so a failed attempt's outcome says
+// whether the TCP connect or the TLS handshake failed.
+const (
+	dialStageConnect   = "connect"
+	dialStageHandshake = "tls handshake"
+)
+
+// dialStageError wraps a dial failure with the stage it failed in.
+type dialStageError struct {
+	stage string
+	err   error
+}
+
+func (e *dialStageError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *dialStageError) Unwrap() error { return e.err }
+
+// absoluteDialName returns the name to resolve for a dial: the Service DNS
+// name made absolute with a trailing dot, so the resolver skips the search
+// list. Under the cluster default of ndots:5, a four-label Service name is
+// otherwise tried against every search domain first, three misses per
+// resolution. IP literals and names already absolute pass through.
+func absoluteDialName(host string) string {
+	if host == "" || net.ParseIP(host) != nil || strings.HasSuffix(host, ".") {
+		return host
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}, nil
+	return host + "."
+}
+
+func (s *Server) agentResolver() ipResolver {
+	if s.AgentResolver != nil {
+		return s.AgentResolver
+	}
+	return net.DefaultResolver
+}
+
+// isNetTimeout reports whether err is a timeout at the network layer,
+// resolution included.
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// dialAgentTLS is the delivery transport's dialer. The Service name is
+// resolved once per attempt, by its absolute name; each TCP connect to the
+// resolved address is bound by AgentConnectTimeout, the documented
+// agentDeliveryConnectTimeout, and a lookup or connect that hits its bound
+// is tried again while the attempt has budget, so a dropped packet costs
+// one bound rather than the whole attempt. The handshake runs under the
+// attempt's deadline, which deliverOnce sets from the read timeout.
+// Certificate and trust pool come from the loader per dial.
+func (s *Server) dialAgentTLS(loader *tlsutil.CertLoader) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			host, port = addr, ""
+		}
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}
+		if s.Config.InsecureSkipAgentVerify {
+			cfg.InsecureSkipVerify = true // dev/test only
+		}
+		if loader != nil {
+			cert, err := loader.Certificate()
+			if err != nil {
+				return nil, err
+			}
+			pool, err := loader.CAPool()
+			if err != nil {
+				return nil, err
+			}
+			cfg.Certificates = []tls.Certificate{*cert}
+			cfg.RootCAs = pool
+		}
+		bound := s.Config.AgentConnectTimeout
+		deadline, bounded := attemptDeadline(ctx)
+		// budgetLeft reports whether another bounded try fits in the attempt.
+		budgetLeft := func() bool {
+			return ctx.Err() == nil && (!bounded || time.Until(deadline) > bound)
+		}
+
+		// Resolve once per attempt; a lookup that times out is retried while
+		// the attempt has budget, and any other failure ends the attempt.
+		var ip net.IP
+		for {
+			lookupCtx, cancel := context.WithTimeout(ctx, bound)
+			addrs, err := s.agentResolver().LookupIPAddr(lookupCtx, absoluteDialName(host))
+			cancel()
+			if err == nil && len(addrs) > 0 {
+				ip = addrs[0].IP
+				break
+			}
+			if err == nil {
+				err = &net.DNSError{Err: "no addresses", Name: host, IsNotFound: true}
+			}
+			if !isNetTimeout(err) || !budgetLeft() {
+				return nil, fmt.Errorf("resolve %s: %w", host, err)
+			}
+		}
+
+		dialer := &net.Dialer{Timeout: bound}
+		target := net.JoinHostPort(ip.String(), port)
+		var raw net.Conn
+		for {
+			var err error
+			raw, err = dialer.DialContext(ctx, network, target)
+			if err == nil {
+				break
+			}
+			// A connect that hit its bound while the attempt still has budget
+			// is dialed again on a fresh connection: a dropped SYN costs one
+			// bound, and the new source port takes a new path through the
+			// data plane. Anything else, and an attempt out of time, fails
+			// the attempt.
+			if !isNetTimeout(err) || !budgetLeft() {
+				return nil, &dialStageError{stage: dialStageConnect, err: err}
+			}
+		}
+		if bounded {
+			_ = raw.SetDeadline(deadline)
+		}
+		conn := tls.Client(raw, cfg)
+		if err := conn.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, &dialStageError{stage: dialStageHandshake, err: err}
+		}
+		// A pooled connection carries no deadline; each request sets its own.
+		_ = raw.SetDeadline(time.Time{})
+		return conn, nil
+	}
 }
 
 // NewControllerActivator builds the production activator client from the
